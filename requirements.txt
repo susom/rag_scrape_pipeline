@@ -1,0 +1,10 @@
+# requirements.txt
+
+beautifulsoup4
+requests
+google-cloud-storage
+pdfplumber
+PyPDF2
+lxml
+tiktoken
+watchfiles

@@ -1,0 +1,57 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.pdb
+*.egg-info/
+*.eggs/
+*.manifest
+*.spec
+*.log
+
+# Virtual env
+.env
+.venv/
+venv/
+ENV/
+structure.txt
+
+# Docker
+.cache/
+.cache-build/
+.cache-run/
+.docker/
+*.pid
+
+# Mac
+.DS_Store
+.AppleDouble
+.LSOverride
+
+# IDEs
+.vscode/
+.idea/
+
+# Project cache
+cache/
+config/*.local
+config/*.secret
+
+# Jupyter
+.ipynb_checkpoints/
+*.ipynb~
+
+# Coverage/test
+.coverage
+htmlcov/
+.tox/
+nosetests.xml
+coverage.xml
+*.cover
+.pytest_cache/
+
+# Node (if frontend creeps in later)
+node_modules/
+npm-debug.log
+yarn-error.log

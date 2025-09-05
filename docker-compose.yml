@@ -1,0 +1,16 @@
+# docker-compose.yml
+services:
+  scraper:
+    build: .
+    container_name: rag_pipeline
+    volumes:
+      - ./cache:/app/cache        # Local cache folder
+      - ./config:/app/config      
+      - ./:/app                   
+    environment:
+      - STORAGE_MODE=local
+    env_file:
+      - .env
+    stdin_open: true
+    tty: true
+    command: watchfiles --ignore-paths /app/cache "python -m rag_pipeline.cli" /app
