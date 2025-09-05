@@ -97,7 +97,7 @@ flowchart TD
 Run the CLI to select a URL or run all:
 
 ```bash
-docker-compose run --rm
+docker-compose run --rm scraper
 ```
 
 ### Direct Orchestration
