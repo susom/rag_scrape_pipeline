@@ -1,0 +1,56 @@
+# Python caches
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.egg-info/
+*.eggs/
+
+# Project outputs
+cache/
+cache/rag_ready/
+cache/raw/
+config/*.local
+config/*.secret
+
+# Environments
+.env
+.venv/
+venv/
+ENV/
+
+# Git + IDE
+.git
+.gitignore
+.vscode
+.idea
+
+# Docker + build junk
+.cache/
+.cache-build/
+.cache-run/
+.docker/
+*.pid
+
+# System
+.DS_Store
+.AppleDouble
+.LSOverride
+
+# Jupyter
+.ipynb_checkpoints/
+*.ipynb~
+
+# Coverage/test
+.coverage
+htmlcov/
+.tox/
+nosetests.xml
+coverage.xml
+*.cover
+.pytest_cache/
+
+# Node (future)
+node_modules/
+npm-debug.log
+yarn-error.log

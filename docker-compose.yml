@@ -1,16 +1,15 @@
-# docker-compose.yml
 services:
   scraper:
     build: .
     container_name: rag_pipeline
+    ports:
+      - "9090:8080"              # map container port 8080 -> localhost:8080
     volumes:
-      - ./cache:/app/cache        # Local cache folder
-      - ./config:/app/config      
-      - ./:/app                   
-    environment:
-      - STORAGE_MODE=local
+      - ./cache:/app/cache
+      - ./config:/app/config
+      - ./:/app
     env_file:
       - .env
     stdin_open: true
     tty: true
-    command: watchfiles --ignore-paths /app/cache "python -m rag_pipeline.cli" /app
+    command: uvicorn rag_pipeline.web:app --host 0.0.0.0 --port 8080

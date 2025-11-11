@@ -55,3 +55,17 @@ coverage.xml
 node_modules/
 npm-debug.log
 yarn-error.log
+
+# Python eggs/caches (extra safety)
+*.egg-info/
+*.eggs/
+
+# Docker build junk (optional but good hygiene)
+.cache-build/
+.cache-run/
+.docker/
+
+# Explicit rag_ready outputs
+cache/rag_ready/
+cache/raw/
+config/urls.txt

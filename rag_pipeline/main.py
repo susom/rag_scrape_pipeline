@@ -12,23 +12,19 @@ from rag_pipeline.processing.sliding_window import SlidingWindowParser
 logger = setup_logger()
 
 
-def main():
+def main(urls: list[str] | None = None):
     storage_mode = os.getenv("STORAGE_MODE", "local")
     storage = StorageManager(storage_mode)
 
-    # Directories for pipeline stages
     raw_dir = os.path.join("cache", "raw")
     rag_ready_dir = os.path.join("cache", "rag_ready")
     os.makedirs(raw_dir, exist_ok=True)
     os.makedirs(rag_ready_dir, exist_ok=True)
 
-    # Load URLs
-    with open("config/urls.txt", "r") as f:
-        urls = [line.strip() for line in f if line.strip()]
-
-    # Override if arg passed
-    if len(sys.argv) > 1:
-        urls = [sys.argv[1]]
+    if urls is None:
+        # fallback to file if not provided
+        with open("config/urls.txt", "r") as f:
+            urls = [line.strip() for line in f if line.strip()]
 
     report_rows = []
 

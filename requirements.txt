@@ -8,3 +8,6 @@ PyPDF2
 lxml
 tiktoken
 watchfiles
+python-dotenv
+fastapi
+uvicorn
