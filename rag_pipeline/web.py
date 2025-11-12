@@ -11,25 +11,22 @@ def root():
     return {"status": "ok", "message": "RAG Pipeline service running"}
 
 @app.post("/run")
-def run_scrape(
-    background_tasks: BackgroundTasks,
-    payload: dict = Body(...)
-):
+def run_scrape(payload: dict = Body(...)):
     urls = payload.get("urls", [])
     if not urls:
         raise HTTPException(status_code=400, detail="No URLs provided")
 
-    logger.info(f"Received request to run pipeline for {len(urls)} URLs")
+    logger.info(f"Running pipeline synchronously for {len(urls)} URLs")
 
-    def task():
-        os.makedirs("config", exist_ok=True)
-        with open("config/urls.txt", "w") as f:
-            f.write("\n".join(urls))
-        run_pipeline(urls)
-        logger.info("Pipeline completed successfully")
+    os.makedirs("config", exist_ok=True)
+    with open("config/urls.txt", "w") as f:
+        f.write("\n".join(urls))
 
-    background_tasks.add_task(task)
-    return {"status": "started", "url_count": len(urls)}
+    run_pipeline(urls)
+
+    logger.info("Pipeline completed successfully")
+    return {"status": "completed", "url_count": len(urls)}
+
 
 @app.get("/health")
 def health_check():
