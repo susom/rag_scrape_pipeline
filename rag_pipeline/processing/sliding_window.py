@@ -16,6 +16,7 @@ from dataclasses import dataclass
 import tiktoken
 from rag_pipeline.processing.ai_client import deepseek_chat
 from rag_pipeline.utils.logger import setup_logger
+from rag_pipeline.storage.storage import StorageManager
 
 logger = setup_logger()
 
@@ -33,7 +34,7 @@ class ProcessingStats:
 class SlidingWindowParser:
     def __init__(
         self,
-        model: str = "deepseek-chat",
+        model: str = "deepseek",
         window_size: int = 25000,
         overlap: int = 8000,
     ):
@@ -194,10 +195,20 @@ class SlidingWindowParser:
         return unique_extracts
 
     def save_to_jsonl(self, extracts: List[str], output_file: str):
+        os.makedirs(os.path.dirname(output_file), exist_ok=True)
         with open(output_file, 'w', encoding='utf-8') as f:
             for extract in extracts:
-                json_obj = {"text": extract}
-                f.write(json.dumps(json_obj, ensure_ascii=False) + '\n')
+                f.write(json.dumps({"text": extract}, ensure_ascii=False) + '\n')
+        logger.info(f"Saved JSONL locally: {output_file}")
+
+        # optional GCS mirror
+        if os.getenv("STORAGE_MODE", "local").lower() == "gcs":
+            try:
+                storage = StorageManager("gcs")
+                storage.save_file(output_file, open(output_file).read())
+                logger.info(f"[GCS PUSH] {output_file} → GCS")
+            except Exception as e:
+                logger.error(f"GCS mirror failed for {output_file}: {e}")
 
     def process_file(self, input_file: str, output_file: str, thinker_name: str) -> int:
         self.stats.start_time = time.time()
@@ -269,7 +280,7 @@ Examples:
     parser.add_argument("input_file", help="Input text file")
     parser.add_argument("output_file", help="Output JSONL file")
     parser.add_argument("--thinker", required=True, help="Context label for extracts (e.g. 'IRB Policy')")
-    parser.add_argument("--model", default="deepseek-chat", help="AI model to use")   # <- changed default
+    parser.add_argument("--model", default="deepseek", help="AI model to use")   # <- changed default
     parser.add_argument("--window-size", type=int, default=25000, help="Window size in tokens")
     parser.add_argument("--overlap", type=int, default=8000, help="Overlap size in tokens")
 

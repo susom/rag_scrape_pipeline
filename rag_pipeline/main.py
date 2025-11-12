@@ -1,5 +1,4 @@
 import os
-import sys
 import hashlib
 import csv
 
@@ -11,7 +10,6 @@ from rag_pipeline.processing.sliding_window import SlidingWindowParser
 
 logger = setup_logger()
 
-
 def main(urls: list[str] | None = None):
     storage_mode = os.getenv("STORAGE_MODE", "local")
     storage = StorageManager(storage_mode)
@@ -22,7 +20,6 @@ def main(urls: list[str] | None = None):
     os.makedirs(rag_ready_dir, exist_ok=True)
 
     if urls is None:
-        # fallback to file if not provided
         with open("config/urls.txt", "r") as f:
             urls = [line.strip() for line in f if line.strip()]
 
@@ -54,7 +51,7 @@ def main(urls: list[str] | None = None):
             storage.save_file(pdf_path, pdf_text)
             pdf_files.append(pdf_path)
 
-        # --- Run sliding window on all raw files ---
+        # --- Sliding window processing ---
         jsonl_outputs = []
         parser = SlidingWindowParser()
         raw_files = [f for f in [html_path] + pdf_files if f]
@@ -78,6 +75,7 @@ def main(urls: list[str] | None = None):
         })
 
     write_report(report_rows)
+    storage.upload_artifacts()  # ✅ automatically handles GCS uploads if in GCS mode
 
 
 def write_report(report_rows, report_path="cache/report.csv"):

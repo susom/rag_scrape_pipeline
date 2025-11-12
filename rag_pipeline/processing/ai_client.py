@@ -23,8 +23,6 @@ def deepseek_chat(
     redcap_api_url = os.getenv("REDCAP_API_URL", "http://localhost/api/")
     redcap_api_token = os.getenv("REDCAP_API_TOKEN")
 
-    logger.info(f"DEBUG: fucker bitch deepseek_chat env check URL={redcap_api_url}, TOKEN={redcap_api_token[:6]+'…' if redcap_api_token else 'None'}")
-
     if not redcap_api_token:
         raise ValueError("Missing REDCAP_API_TOKEN in environment.")
 
