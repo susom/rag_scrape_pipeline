@@ -3,7 +3,7 @@
 Sliding Window RAW TEXT Parser
 Extracts complete contextual thought structures from large texts
 using overlapping windows to preserve reasoning chains.
-Optimized for DeepSeek API and designed for training pipeline integration.
+Optimized for GPT-4.1 via SecureChatAI and designed for training pipeline integration.
 """
 
 import re
@@ -14,11 +14,39 @@ import time
 from typing import List, Tuple
 from dataclasses import dataclass
 import tiktoken
-from rag_pipeline.processing.ai_client import deepseek_chat
+from rag_pipeline.processing.ai_client import chat_completion, DEFAULT_MODEL
 from rag_pipeline.utils.logger import setup_logger
 from rag_pipeline.storage.storage import StorageManager
 
 logger = setup_logger()
+
+
+# Strict output rules for extraction - prepended to system prompt
+STRICT_OUTPUT_RULES = """CRITICAL OUTPUT RULES:
+- Output ONLY the extracted content
+- Do NOT include reasoning, analysis, explanations, or meta commentary
+- Do NOT include <think>, <analysis>, or similar markers
+- Do NOT explain what you are doing
+- If content is already clean, return it verbatim
+- If you violate these rules, the output is invalid
+---
+
+"""
+
+# Default system prompt for extraction
+DEFAULT_SYSTEM_PROMPT = STRICT_OUTPUT_RULES + """You are a content extraction assistant. Your job is to extract the main, relevant content from the provided text while removing any navigation, boilerplate, or irrelevant elements. Output ONLY the extracted content. Preserve important information like dates, names, numbers, and structured data (tables). If the content is already clean, return it as-is without modification."""
+
+# Default user prompt template
+DEFAULT_USER_TEMPLATE = """Extract the main content from this text.
+
+REMOVE: navigation, headers, footers, menus, scripts, boilerplate
+PRESERVE: tables, lists, dates, names, numbers, factual wording
+
+Do not summarize or rewrite. Preserve the original factual wording.
+
+--- BEGIN TEXT ---
+{window_text}
+--- END TEXT ---"""
 
 @dataclass
 class ProcessingStats:
@@ -34,7 +62,7 @@ class ProcessingStats:
 class SlidingWindowParser:
     def __init__(
         self,
-        model: str = "deepseek",
+        model: str = DEFAULT_MODEL,
         window_size: int = 25000,
         overlap: int = 8000,
     ):
@@ -58,6 +86,11 @@ class SlidingWindowParser:
     def count_tokens(self, text: str) -> int:
         return len(self.tokenizer.encode(text))
 
+    def split_into_sections(self, text: str):
+        # Split on each Section Number: ###
+        parts = re.split(r'(?=Section Number:\s*\d+)', text)
+        return [p.strip() for p in parts if p.strip()]
+
     def create_windows(self, text: str) -> List[Tuple[str, int, int]]:
         print(f"🔍 Creating sliding windows...")
         print(f"   Window size: {self.window_size:,} tokens")
@@ -80,64 +113,124 @@ class SlidingWindowParser:
         print(f"   Created {len(windows)} windows")
         return windows
 
-    def extract_from_window(self, window_text: str, thinker_name: str, window_num: int, total_windows: int) -> List[str]:
-        # System prompt: lock the model into extractor mode
-        system_prompt = (
-            "You are a deterministic policy/document extractor. Your only job is to emit verbatim institutional policy and process content as atomic concepts, suitable for retrieval-augmented chat. You must not explain, reason, or comment. You must not add headings, paraphrases, or summaries."
-        )
-
-        # User prompt: define what counts as a “concept” and the ONLY allowed output format
-        user_prompt = f"""
-        Extract institutional policy concepts from the text below.  
-        Each extract must be output in the following format only:  
-
-        EXTRACT: <verbatim concept>  
-
-        Rules for what counts as a concept:  
-        - Protocol requirements (e.g. “protocols must be complete to be assigned to a Panel”)  
-        - Timeframes and deadlines (e.g. “Regular review takes 4–6 weeks”)  
-        - Procedures or steps (e.g. “protocol submission is done online using the eProtocol system”)  
-        - Conditions and exceptions (e.g. “under no circumstances may research begin until approval letter is received”)  
-        - Oversight or responsibility assignments (e.g. “student investigators must list an academic sponsor”)  
-        - Compliance or registration obligations (e.g. “all clinical trials must register at ClinicalTrials.gov”)  
-
-        Exclusions:  
-        - Navigation, headings, menus, contact details, generic boilerplate.  
-        - Lists of offices or org charts unless they contain requirements.  
-        - Any commentary, reasoning, or explanation from you.  
-
-        If a concept spans multiple lines, merge them into a single verbatim extract.  
-        Output **only EXTRACT lines**. Do not output anything else.  
-
-        --- BEGIN TEXT ---
-        {window_text}
-        --- END TEXT ---
-
-        Output format:
-        EXTRACT: Under no circumstances may research begin until the Protocol Director has received a Notice of Certification or an IRB Approval Letter.
-        EXTRACT: All Regular protocols must be presented, discussed and voted on at a convened meeting of the IRB.
-        EXTRACT: Federal regulations allow for some protocols involving minimal risk to be reviewed by a single IRB member.
-        EXTRACT: Student investigators must list an academic sponsor on the protocol.
-        EXTRACT: All clinical trials meeting HHS regulations and NIH policy must register at ClinicalTrials.gov.
+    def _sanitize_ai_output(self, text: str, fallback_text: str) -> str:
         """
+        Defensive post-processing to clean AI output.
+
+        - Strips <think>...</think> blocks
+        - Strips leading conversational phrases
+        - Trims whitespace
+        - Falls back to cleaned raw text if empty
+        """
+        if not text:
+            return fallback_text.strip()
+
+        result = text
+
+        # Strip <think>...</think> blocks (case-insensitive, multiline)
+        result = re.sub(r'<think>.*?</think>', '', result, flags=re.IGNORECASE | re.DOTALL)
+
+        # Strip <analysis>...</analysis> blocks
+        result = re.sub(r'<analysis>.*?</analysis>', '', result, flags=re.IGNORECASE | re.DOTALL)
+
+        # Strip leading conversational phrases
+        leading_phrases = [
+            r'^Okay,?\s*',
+            r'^Sure,?\s*',
+            r'^Here is the extracted content:?\s*',
+            r'^Here\'s the extracted content:?\s*',
+            r'^The extracted content is:?\s*',
+            r'^Extracted content:?\s*',
+        ]
+        for pattern in leading_phrases:
+            result = re.sub(pattern, '', result, flags=re.IGNORECASE)
+
+        result = result.strip()
+
+        # If result is empty after sanitization, fall back to cleaned raw text
+        if not result:
+            logger.warning("AI output was empty after sanitization, using fallback")
+            return fallback_text.strip()
+
+        return result
+
+    def extract_from_window(self, window_text: str, thinker_name: str, window_num: int, total_windows: int) -> List[str]:
+        """
+        Process a sliding window through AI to extract clean, RAG-ready content.
+        Always uses AI - the whole point of this tool.
+
+        Returns list of extracted text sections (usually one per window).
+        """
+        # Load prompts from config or use sensible defaults
+        system_prompt, user_prompt = self._load_prompts(window_text)
+        fallback_used = False
 
         try:
-            print(f"   Processing window {window_num}/{total_windows}...")
-            content = deepseek_chat(
+            logger.info(f"Window {window_num}/{total_windows}: Calling AI model={self.model}")
+            print(f"   Processing window {window_num}/{total_windows} via AI (model={self.model})...")
+
+            raw_response = chat_completion(
                 user_prompt,
-                model=self.model,
-                temperature=0.2,    # be crisp
-                max_tokens=800,     # chat model limit-friendly
+                model_hint=self.model,
+                temperature=0.1,  # Low temp for faithful extraction
+                max_tokens=4000,  # Allow longer responses for full content
                 system_prompt=system_prompt,
             )
-            extracts = self._parse_extracts(content)
-            print(f"      → Extracted {len(extracts)} thought structures")
-            self.stats.input_tokens += len(user_prompt)
-            self.stats.output_tokens += len(content)
-            return extracts
+
+            self.stats.input_tokens += self.count_tokens(user_prompt)
+            self.stats.output_tokens += self.count_tokens(raw_response)
+
+            # Sanitize AI output
+            clean_text = self._sanitize_ai_output(raw_response, window_text)
+
+            if clean_text == window_text.strip():
+                fallback_used = True
+                logger.warning(f"Window {window_num}: Used fallback (AI returned empty/invalid)")
+
+            logger.info(f"Window {window_num}: Extracted {len(clean_text)} chars, fallback={fallback_used}")
+            print(f"      → Extracted {len(clean_text)} chars")
+            return [clean_text]
+
         except Exception as e:
-            print(f"   ⚠️ Error processing window {window_num}: {e}")
-            return []
+            fallback_used = True
+            logger.error(f"Window {window_num}: AI extraction failed: {e}, using fallback")
+            print(f"   ⚠️ AI extraction failed for window {window_num}: {e}")
+            print(f"      → Falling back to raw text")
+            return [window_text.strip()]
+
+    def _load_prompts(self, window_text: str) -> tuple[str, str]:
+        """Load prompts from config file or return sensible defaults."""
+        config_path = "config/sliding_window_prompts.json"
+
+        system_prompt = DEFAULT_SYSTEM_PROMPT
+        user_template = DEFAULT_USER_TEMPLATE
+
+        if os.path.exists(config_path):
+            try:
+                with open(config_path, "r", encoding="utf-8") as f:
+                    cfg = json.load(f)
+
+                loaded_system = cfg.get("system", "").strip()
+                loaded_user = cfg.get("user_template", "").strip()
+
+                # Use config values if they look valid (not corrupted)
+                # Always prepend strict output rules to system prompt
+                if loaded_system and "Ã" not in loaded_system:
+                    # Ensure strict rules are at the top
+                    if "CRITICAL OUTPUT RULES" not in loaded_system:
+                        system_prompt = STRICT_OUTPUT_RULES + loaded_system
+                    else:
+                        system_prompt = loaded_system
+
+                if loaded_user and "Ã" not in loaded_user and "{window_text}" in loaded_user:
+                    user_template = loaded_user
+
+            except Exception as e:
+                logger.warning(f"Failed to load prompts from config: {e}")
+
+        user_prompt = user_template.format(window_text=window_text)
+        return system_prompt, user_prompt
+
 
     def _parse_extracts(self, response: str) -> List[str]:
         extracts = []
@@ -194,23 +287,42 @@ class SlidingWindowParser:
                 unique_extracts.append(extract)
         return unique_extracts
 
-    def save_to_jsonl(self, extracts: List[str], output_file: str):
-        os.makedirs(os.path.dirname(output_file), exist_ok=True)
-        with open(output_file, 'w', encoding='utf-8') as f:
+    def _rag_ready_path(self, output_file: str) -> str:
+        # Always write JSONL into cache/rag_ready/<basename>.jsonl
+        base = os.path.basename(output_file)
+        path = os.path.join("cache", "rag_ready", base)
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        return path
+
+    def save_section_json(self, section_json_str, output_file):
+        """Save ONE section as a single JSON object for RAG ingestion."""
+        final_path = self._rag_ready_path(output_file)
+        os.makedirs(os.path.dirname(final_path), exist_ok=True)
+
+        # Ensure the extract is valid JSON
+        section_obj = json.loads(section_json_str)
+
+        with open(final_path, "w", encoding="utf-8") as f:
+            json.dump(section_obj, f, ensure_ascii=False, indent=2)
+
+        logger.info(f"Saved JSON for ingestion: {final_path}")
+
+    def save_to_jsonl(self, extracts, output_file, source="main", section_id=None, url=None):
+        final_path = self._rag_ready_path(output_file)
+        with open(final_path, "w", encoding="utf-8") as f:
             for extract in extracts:
-                f.write(json.dumps({"text": extract}, ensure_ascii=False) + '\n')
-        logger.info(f"Saved JSONL locally: {output_file}")
+                record = {
+                    "text": extract,
+                    "metadata": {
+                        "source": source,
+                        "section_id": section_id or "",
+                        "url": url or ""
+                    }
+                }
+                f.write(json.dumps(record, ensure_ascii=False) + "\n")
+        logger.info(f"Saved JSONL locally: {final_path}")
 
-        # optional GCS mirror
-        if os.getenv("STORAGE_MODE", "local").lower() == "gcs":
-            try:
-                storage = StorageManager("gcs")
-                storage.save_file(output_file, open(output_file).read())
-                logger.info(f"[GCS PUSH] {output_file} → GCS")
-            except Exception as e:
-                logger.error(f"GCS mirror failed for {output_file}: {e}")
-
-    def process_file(self, input_file: str, output_file: str, thinker_name: str) -> int:
+    def process_file(self, input_file: str, output_file: str, thinker_name: str) -> tuple[int, list[dict]]:
         self.stats.start_time = time.time()
 
         print(f"🚀 Sliding Window Processing")
@@ -222,6 +334,41 @@ class SlidingWindowParser:
 
         with open(input_file, 'r', encoding='utf-8') as f:
             text = f.read()
+
+        # 🧩 Doc-specific overfit mode: split by explicit "Section Number"
+        if "All Content" in os.path.basename(input_file):
+            print("🧠 Detected 'All Content' document — switching to section-by-section extraction mode")
+            try:
+                sections = self.split_into_sections(text)
+                print(f"   Found {len(sections)} discrete sections")
+
+                all_extracts = []
+                for idx, section_text in enumerate(sections, 1):
+                    section_id = re.search(r'Section Number:\s*(\d+)', section_text)
+                    section_id = section_id.group(1) if section_id else f"{idx:03d}"
+                    print(f"   → Extracting Section {section_id}")
+
+                    extracts = self.extract_from_window(section_text, thinker_name, idx, len(sections))
+                    if extracts:
+                        all_extracts.extend(extracts)
+                print("✅ Section-based extraction complete.")
+                # Build sections data for canonical JSON output
+                sections_data = [
+                    {
+                        "text": extract,
+                        "window_index": idx,
+                        "char_start": None,
+                        "char_end": None,
+                        "section_title": None,
+                        "ai_normalized": True,
+                        "ai_trigger_reason": "always_ai",
+                        "ai_request_count": 1,
+                    }
+                    for idx, extract in enumerate(all_extracts, start=1)
+                ]
+                return len(all_extracts), sections_data
+            except Exception as e:
+                print(f"⚠️ Section split failed, reverting to normal sliding-window mode ({e})")
 
         windows = self.create_windows(text)
 
@@ -244,9 +391,6 @@ class SlidingWindowParser:
         unique_extracts = self.deduplicate_extracts(all_extracts)
         print(f"   After: {len(unique_extracts)} unique extracts")
 
-        print(f"\n💾 Saving to {output_file}...")
-        self.save_to_jsonl(unique_extracts, output_file)
-
         total_time = time.time() - self.stats.start_time
         cost = self.calculate_cost()
         self.stats.concepts_extracted = len(unique_extracts)
@@ -261,10 +405,24 @@ class SlidingWindowParser:
         print(f"📤 Output tokens: {self.stats.output_tokens:,}")
         print(f"💰 Estimated cost (discount pricing): ${cost:.3f}")
         print(f"🧠 Thought structures extracted: {len(unique_extracts)}")
-        print(f"📁 Output file: {output_file}")
-        print(f"🎯 Ready for training pipeline!")
+        print(f"🎯 Ready for canonical JSON output!")
 
-        return len(unique_extracts)
+        # Build sections data for canonical JSON output
+        sections_data = [
+            {
+                "text": extract,
+                "window_index": idx,
+                "char_start": None,
+                "char_end": None,
+                "section_title": None,
+                "ai_normalized": True,  # Always AI in this version
+                "ai_trigger_reason": "always_ai",
+                "ai_request_count": 1,
+            }
+            for idx, extract in enumerate(unique_extracts, start=1)
+        ]
+
+        return len(unique_extracts), sections_data
 
 
 def main():
@@ -280,7 +438,7 @@ Examples:
     parser.add_argument("input_file", help="Input text file")
     parser.add_argument("output_file", help="Output JSONL file")
     parser.add_argument("--thinker", required=True, help="Context label for extracts (e.g. 'IRB Policy')")
-    parser.add_argument("--model", default="deepseek", help="AI model to use")   # <- changed default
+    parser.add_argument("--model", default=DEFAULT_MODEL, help=f"AI model to use (default: {DEFAULT_MODEL})")
     parser.add_argument("--window-size", type=int, default=25000, help="Window size in tokens")
     parser.add_argument("--overlap", type=int, default=8000, help="Overlap size in tokens")
 
@@ -293,8 +451,9 @@ Examples:
     )
 
     try:
-        count = sliding_parser.process_file(args.input_file, args.output_file, args.thinker)
+        count, sections = sliding_parser.process_file(args.input_file, args.output_file, args.thinker)
         print(f"\n🎉 Success! Generated {count} extracts for your pipeline.")
+        print(f"   (Use rag_pipeline.main or web API for canonical JSON output)")
         return 0
     except Exception as e:
         print(f"\n❌ Error: {e}")

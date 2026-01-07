@@ -27,12 +27,14 @@ class StorageManager:
             logger.info("GCS disabled (no GCS_BUCKET). Running local-only.")
 
     # ---------- ALWAYS write locally ----------
-    def save_file(self, filename: str, content: str):
-        path = filename if filename.startswith(self.base_path) else os.path.join(self.base_path, filename)
+    def save_file(self, path, content):
         os.makedirs(os.path.dirname(path), exist_ok=True)
+        # handle list content safely
+        if isinstance(content, list):
+            content = "\n\n".join(str(c) for c in content)
         with open(path, "w", encoding="utf-8") as f:
             f.write(content)
-        logger.info(f"Saved locally: {path}")
+
 
     # ---------- MIRROR local cache → GCS ----------
     def upload_artifacts(self):
@@ -76,13 +78,13 @@ class StorageManager:
         logger.info(f"Upload complete: {uploaded}/{len(to_upload)} file(s) mirrored to GCS.")
         
         # ---------- CLEANUP ----------
-        try:
-            for root, dirs, files in os.walk(self.base_path, topdown=False):
-                for f in files:
-                    os.remove(os.path.join(root, f))
-                for d in dirs:
-                    os.rmdir(os.path.join(root, d))
-            logger.info(f"Cache cleared: {self.base_path}")
-        except Exception as e:
-            logger.error(f"Cache cleanup failed: {e}")
+        # try:
+        #     for root, dirs, files in os.walk(self.base_path, topdown=False):
+        #         for f in files:
+        #             os.remove(os.path.join(root, f))
+        #         for d in dirs:
+        #             os.rmdir(os.path.join(root, d))
+        #     logger.info(f"Cache cleared: {self.base_path}")
+        # except Exception as e:
+        #     logger.error(f"Cache cleanup failed: {e}")
 

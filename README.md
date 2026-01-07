@@ -1,48 +1,121 @@
-# RAG Content Ingestion Pipeline
+# CRIP - Content Retrieval & Ingestion Pipeline
 
-A modular pipeline for scraping, parsing, and processing content into JSONL suitable for Retrieval-Augmented Generation (RAG) ingestion.
+A modular pipeline for scraping, parsing, and processing content into RAG-ready JSON artifacts.
+
+**Primary Interface: Web API** at `localhost:9090`
 
 ## Features
 
-- 🌐 URL scraping (HTML snapshots, main content extraction, PDF detection)
-- 📄 PDF parsing (via `pdfplumber`)
-- 💾 Local caching (`cache/raw` for raw HTML/PDF text)
-- 🧠 Sliding window processing with DeepSeek (`deepseek-reasoner`)
-- ✅ Deduplication & JSONL output (`cache/rag_ready`)
-- 🔧 Modular design (`rag_pipeline/` package with submodules)
-
-### Coming Soon
-- ☁️ GCS storage integration
-- 📦 Automated Pinecone ingestion
-- ⏰ Cloud Scheduler for periodic refresh
+- Web API with HTML UI for interactive processing
+- URL scraping (HTML snapshots, main content extraction, PDF detection)
+- PDF parsing (via `pdfplumber`)
+- Local caching (`cache/raw` for raw HTML/PDF text)
+- Sliding window processing via SecureChatAI (REDCap proxy)
+- Deduplication & canonical JSON output (`cache/rag_ready`)
+- GCS storage integration (optional)
+- Modular design (`rag_pipeline/` package with submodules)
 
 ---
 
 ## Pipeline Flow
 
----
-
-## Quick Start Flow
-
 ```mermaid
 flowchart LR
     A[URLs] --> B[Scraper/PDF Parser] --> C[cache/raw]
-    C --> D[Sliding Window + DeepSeek] --> E[cache/rag_ready JSONL]
+    C --> D[Sliding Window] --> E[cache/rag_ready JSON]
 ```
 
-## Detailed Pipeline Flow
+---
 
-```mermaid
-flowchart TD
-    A[URL list<br/>config/urls.txt] --> B[Scraper<br/>HTML/PDF detect]
-    B -->|Save raw HTML| C[cache/raw]
-    B -->|Download PDFs| D[PDF Parser]
-    D -->|Save raw text| C
+## Quick Start
 
-    C --> E[Sliding Window Parser<br/>DeepSeek API]
-    E -->|Deduplicate + Clean| F[cache/rag_ready<br/>JSONL]
+1. Clone the repo
+2. Create `.env` with your credentials:
+   ```env
+   REDCAP_API_URL=https://your-redcap-instance/api/
+   REDCAP_API_TOKEN=your_token_here
+   GCS_BUCKET=your-bucket-name  # optional
+   ```
+3. Build and run:
+   ```bash
+   docker-compose build
+   docker-compose up
+   ```
+4. Open `http://localhost:9090` in your browser
 
-    F --> G[(RAG ingestion<br/>Vector DB / Pinecone)]
+---
+
+## Usage
+
+### Web API (Primary)
+
+Start the server and visit `http://localhost:9090`:
+```bash
+docker-compose up
+```
+
+The web UI allows you to:
+- Enter URLs to process
+- Configure prompts
+- Toggle link-following
+- Upload documents (PDF, DOCX, TXT)
+
+### API Endpoints
+
+**POST /run** - Process URLs
+```bash
+curl -X POST http://localhost:9090/run \
+  -H "Content-Type: application/json" \
+  -d '{"urls": ["https://example.com"], "follow_links": true}'
+```
+
+Response:
+```json
+{
+  "status": "completed",
+  "run_id": "crip_2026-01-06T18-30-00Z_a1b2c3d4",
+  "output_path": "cache/rag_ready/crip_2026-01-06T18-30-00Z_a1b2c3d4.json",
+  "stats": {"documents_processed": 1, "total_sections": 5, ...},
+  "warnings": []
+}
+```
+
+**POST /upload** - Upload and process a document
+
+**GET /health** - Health check
+
+### CLI
+
+Run the pipeline from command line:
+```bash
+docker-compose run --rm scraper python -m rag_pipeline.main
+```
+
+---
+
+## Output Format
+
+CRIP produces a single canonical JSON file per run at `cache/rag_ready/{run_id}.json`.
+
+Schema version: `crip.v1`
+
+```json
+{
+  "schema_version": "crip.v1",
+  "crip_version": "0.2.0",
+  "run": {
+    "run_id": "crip_2026-01-06T18-30-00Z_a1b2c3d4",
+    "timestamp_start": "2026-01-06T18:30:00Z",
+    "timestamp_end": "2026-01-06T18:32:15Z",
+    "triggered_by": "web_api",
+    "run_mode": "deterministic",
+    "follow_links": true,
+    "tags": []
+  },
+  "documents": [...],
+  "aggregate_stats": {...},
+  "warnings": [...]
+}
 ```
 
 ---
@@ -53,21 +126,25 @@ flowchart TD
 .
 ├── cache/
 │   ├── raw/           # raw scraped HTML/PDF text
-│   └── rag_ready/     # processed JSONL output
+│   └── rag_ready/     # canonical JSON output
 ├── config/
-│   └── urls.txt       # list of target URLs
+│   ├── urls.txt       # default URL list
+│   └── sliding_window_prompts.json
 ├── docker-compose.yml
 ├── Dockerfile
 ├── requirements.txt
 ├── README.md
+├── CLAUDE.md
 └── rag_pipeline/
-    ├── cli.py
-    ├── main.py
+    ├── web.py              # FastAPI web interface (primary)
+    ├── main.py             # CLI entrypoint + run_pipeline()
+    ├── cli.py              # Interactive CLI
+    ├── output_json.py      # Canonical JSON writer
     ├── scraping/
     │   ├── scraper.py
     │   └── pdf_parser.py
     ├── processing/
-    │   ├── ai_client.py
+    │   ├── ai_client.py    # SecureChatAI proxy
     │   └── sliding_window.py
     ├── storage/
     │   └── storage.py
@@ -77,50 +154,21 @@ flowchart TD
 
 ---
 
-## Setup
+## Environment Variables
 
-1. Clone the repo
-2. Create `.env` with your DeepSeek key:
-   ```env
-   DEEPSEEK_API_KEY=your_key_here
-   ```
-3. Build the image:
-   ```bash
-   docker-compose build
-   ```
+| Variable | Required | Description |
+|----------|----------|-------------|
+| `REDCAP_API_URL` | Yes | REDCap API endpoint for SecureChatAI |
+| `REDCAP_API_TOKEN` | Yes | REDCap API token |
+| `GCS_BUCKET` | No | GCS bucket for artifact upload |
+| `STORAGE_MODE` | No | `local` (default) or `gcs` |
 
 ---
 
-## Usage
+## Run Modes
 
-### Interactive CLI
-Run the CLI to select a URL or run all:
-
-```bash
-docker-compose run --rm scraper
-```
-
-### Direct Orchestration
-Run the whole pipeline on all URLs in `config/urls.txt`:
-
-```bash
-docker-compose run --rm python -m rag_pipeline.main
-```
-
-Run it on a single URL:
-
-```bash
-docker-compose run --rm python -m rag_pipeline.main https://example.com/page
-```
-
----
-
-## Example Output
-
-Example JSONL (`cache/rag_ready/irb_manual.jsonl`):
-
-```json
-{"text": "Informed consent requires disclosure of risks and benefits..."}
-{"text": "Investigators must maintain accurate and complete study records..."}
-{"text": "IRB review ensures compliance with federal regulations..."}
-```
+| Mode | Description |
+|------|-------------|
+| `deterministic` | Pure text extraction, no AI calls (default) |
+| `ai_auto` | AI triggered by noise detection heuristics |
+| `ai_always` | Every chunk passes through AI normalization |
