@@ -8,22 +8,15 @@ load_dotenv()
 
 logger = setup_logger()
 
-# Default model for CRIP extraction
-DEFAULT_MODEL = "gpt-4.1"
+# Default model for CRAPP extraction
+DEFAULT_MODEL = "o1"
 
 # Available models via SecureChatAI adapter
 AVAILABLE_MODELS = [
     "gpt-4.1",
-    "gpt-4o",
     "gpt-5",
     "o1",
     "o3-mini",
-    "claude",
-    "deepseek",
-    "llama-Maverick",
-    "llama3370b",
-    "gemini25pro",
-    "gemini20flash",
 ]
 
 
@@ -31,9 +24,10 @@ def chat_completion(
     prompt: str,
     model: str | None = None,
     temperature: float = 0.2,
-    max_tokens: int = 800,
+    max_tokens: int = 32000,
     system_prompt: str | None = None,
     model_hint: str | None = None,
+    json_schema: dict | None = None,
 ) -> str:
     """
     Sends prompt to SecureChatAI External Module via REDCap API.
@@ -75,6 +69,10 @@ def chat_completion(
     if system_prompt:
         prompt = f"{system_prompt}\n\n{prompt}"
     payload["prompt"] = prompt
+    
+    if json_schema:
+        import json as json_lib
+        payload["json_schema"] = json_lib.dumps(json_schema)
 
     try:
         resp = requests.post(redcap_api_url, data=payload, timeout=120)

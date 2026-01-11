@@ -1,5 +1,5 @@
 """
-Web scraper for CRIP pipeline.
+Web scraper for CRAPP pipeline.
 Extracts main content and attachment links from web pages.
 """
 

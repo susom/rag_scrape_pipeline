@@ -1,5 +1,5 @@
 """
-CRIP Pipeline - Main orchestration module.
+CRAPP - Main orchestration module.
 
 Provides:
 - run_pipeline(): Core pipeline function for programmatic use
@@ -37,7 +37,7 @@ def run_pipeline(
     model: str | None = None,
 ) -> dict:
     """
-    Run the CRIP pipeline on a list of URLs.
+    Run the CRAPP pipeline on a list of URLs.
 
     Args:
         urls: List of URLs to process

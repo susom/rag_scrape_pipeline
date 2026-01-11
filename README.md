@@ -1,4 +1,4 @@
-# CRIP - Content Retrieval & Ingestion Pipeline
+# CRAPP - Content RAG Preparation Pipeline
 
 A modular pipeline for scraping, parsing, and processing content into RAG-ready JSON artifacts.
 
@@ -73,8 +73,8 @@ Response:
 ```json
 {
   "status": "completed",
-  "run_id": "crip_2026-01-06T18-30-00Z_a1b2c3d4",
-  "output_path": "cache/rag_ready/crip_2026-01-06T18-30-00Z_a1b2c3d4.json",
+  "run_id": "crapp_2026-01-06T18-30-00Z_a1b2c3d4",
+  "output_path": "cache/rag_ready/crapp_2026-01-06T18-30-00Z_a1b2c3d4.json",
   "stats": {"documents_processed": 1, "total_sections": 5, ...},
   "warnings": []
 }
@@ -95,16 +95,16 @@ docker-compose run --rm scraper python -m rag_pipeline.main
 
 ## Output Format
 
-CRIP produces a single canonical JSON file per run at `cache/rag_ready/{run_id}.json`.
+CRAPP produces a single canonical JSON file per run at `cache/rag_ready/{run_id}.json`.
 
-Schema version: `crip.v1`
+Schema version: `crapp.v1`
 
 ```json
 {
-  "schema_version": "crip.v1",
-  "crip_version": "0.2.0",
+  "schema_version": "crapp.v1",
+  "crapp_version": "0.2.0",
   "run": {
-    "run_id": "crip_2026-01-06T18-30-00Z_a1b2c3d4",
+    "run_id": "crapp_2026-01-06T18-30-00Z_a1b2c3d4",
     "timestamp_start": "2026-01-06T18:30:00Z",
     "timestamp_end": "2026-01-06T18:32:15Z",
     "triggered_by": "web_api",

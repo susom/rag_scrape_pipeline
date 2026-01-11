@@ -1,6 +1,6 @@
 """
-Canonical JSON output writer for CRIP pipeline.
-Produces crip.v1 schema artifacts.
+Canonical JSON output writer for CRAPP pipeline.
+Produces crapp.v1 schema artifacts.
 """
 
 import os
@@ -12,7 +12,7 @@ from typing import Optional
 from rag_pipeline.processing.ai_client import DEFAULT_MODEL
 
 # Pipeline version - update on releases
-CRIP_VERSION = "0.2.0"
+CRAPP_VERSION = "0.2.0"
 
 
 def _sha256(data: str) -> str:
@@ -144,8 +144,8 @@ def write_canonical_json(
 
     # Assemble canonical output
     canonical_output = {
-        "schema_version": "crip.v1",
-        "crip_version": CRIP_VERSION,
+        "schema_version": "crapp.v1",
+        "crapp_version": CRAPP_VERSION,
         "run": {
             "run_id": run_id,
             "timestamp_start": start_time.isoformat(),
@@ -186,8 +186,8 @@ def generate_run_id(input_uris: list[str]) -> str:
     """
     Generate deterministic run ID from timestamp and input URIs.
 
-    Format: crip_YYYY-MM-DDTHH-MM-SSZ_XXXXXXXX
+    Format: crapp_YYYY-MM-DDTHH-MM-SSZ_XXXXXXXX
     """
     timestamp = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H-%M-%SZ")
     uri_hash = _sha256("".join(sorted(input_uris)))[:8]
-    return f"crip_{timestamp}_{uri_hash}"
+    return f"crapp_{timestamp}_{uri_hash}"

@@ -162,7 +162,8 @@ class SlidingWindowParser:
         Returns list of extracted text sections (usually one per window).
         """
         # Load prompts from config or use sensible defaults
-        system_prompt, user_prompt = self._load_prompts(window_text)
+        # Pass thinker_name to select source-type-specific prompts
+        system_prompt, user_prompt = self._load_prompts(window_text, thinker_name)
         fallback_used = False
 
         try:
@@ -173,7 +174,7 @@ class SlidingWindowParser:
                 user_prompt,
                 model_hint=self.model,
                 temperature=0.1,  # Low temp for faithful extraction
-                max_tokens=4000,  # Allow longer responses for full content
+                max_tokens=32000,  # Updated for larger response allowance
                 system_prompt=system_prompt,
             )
 
@@ -198,8 +199,12 @@ class SlidingWindowParser:
             print(f"      → Falling back to raw text")
             return [window_text.strip()]
 
-    def _load_prompts(self, window_text: str) -> tuple[str, str]:
-        """Load prompts from config file or return sensible defaults."""
+    def _load_prompts(self, window_text: str, thinker_name: str = "default") -> tuple[str, str]:
+        """
+        Load prompts from config file or return sensible defaults.
+
+        Supports source-type-specific prompts (DOCX, PDF, WebPage/default).
+        """
         config_path = "config/sliding_window_prompts.json"
 
         system_prompt = DEFAULT_SYSTEM_PROMPT
@@ -210,8 +215,13 @@ class SlidingWindowParser:
                 with open(config_path, "r", encoding="utf-8") as f:
                     cfg = json.load(f)
 
-                loaded_system = cfg.get("system", "").strip()
-                loaded_user = cfg.get("user_template", "").strip()
+                # Select prompt set based on thinker_name (source type)
+                # Maps: DOCX -> "DOCX", PDF -> "PDF", WebPage -> "default"
+                prompt_key = thinker_name if thinker_name in cfg else "default"
+                prompt_set = cfg.get(prompt_key, cfg.get("default", {}))
+
+                loaded_system = prompt_set.get("system", "").strip()
+                loaded_user = prompt_set.get("user_template", "").strip()
 
                 # Use config values if they look valid (not corrupted)
                 # Always prepend strict output rules to system prompt
@@ -224,6 +234,8 @@ class SlidingWindowParser:
 
                 if loaded_user and "Ã" not in loaded_user and "{window_text}" in loaded_user:
                     user_template = loaded_user
+
+                logger.info(f"Loaded prompts for source type: {prompt_key}")
 
             except Exception as e:
                 logger.warning(f"Failed to load prompts from config: {e}")

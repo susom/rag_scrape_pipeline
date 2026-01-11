@@ -1,5 +1,5 @@
 """
-CRIP Web API - Content Retrieval & Ingestion Pipeline
+CRAPP Web API - Content RAG Preparation Pipeline
 Primary interface for the RAG preparation tool.
 """
 
@@ -16,13 +16,13 @@ except ImportError:
     docx2txt = None
 
 from rag_pipeline.main import run_pipeline
-from rag_pipeline.output_json import generate_run_id, write_canonical_json, CRIP_VERSION
+from rag_pipeline.output_json import generate_run_id, write_canonical_json, CRAPP_VERSION
 from rag_pipeline.utils.logger import setup_logger
 from rag_pipeline.processing.sliding_window import SlidingWindowParser
 from rag_pipeline.processing.ai_client import AVAILABLE_MODELS, DEFAULT_MODEL
 from datetime import datetime, timezone
 
-app = FastAPI(title="CRIP - Content Retrieval & Ingestion Pipeline")
+app = FastAPI(title="CRAPP - Content RAG Preparation Pipeline")
 logger = setup_logger()
 
 # Default prompts
@@ -80,7 +80,7 @@ def home():
 <!DOCTYPE html>
 <html>
 <head>
-    <title>CRIP - RAG Content Pipeline</title>
+    <title>CRaPP - Content RAG Preparation Pipeline</title>
     <style>
         body {{ font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; margin: 0; padding: 20px; background: #f5f5f5; }}
         .container {{ max-width: 900px; margin: 0 auto; }}
@@ -107,8 +107,8 @@ def home():
 </head>
 <body>
     <div class="container">
-        <h1>CRIP</h1>
-        <p class="subtitle">Content Retrieval & Ingestion Pipeline v{CRIP_VERSION}</p>
+        <h1>CRaPP</h1>
+        <p class="subtitle">Content RAG Preparation Pipeline v{CRAPP_VERSION}</p>
 
         <details>
             <summary>Customize AI Extraction Prompts (Advanced)</summary>
@@ -430,4 +430,4 @@ def download_output(run_id: str):
 
 @app.get("/health")
 def health_check():
-    return {"health": "ok", "version": CRIP_VERSION}
+    return {"health": "ok", "version": CRAPP_VERSION}
