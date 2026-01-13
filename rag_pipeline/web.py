@@ -1,10 +1,11 @@
 """
-CRAPP Web API - Content RAG Preparation Pipeline
+RPP Web API - RAG Preparation Pipeline
 Primary interface for the RAG preparation tool.
 """
 
 from fastapi import FastAPI, HTTPException, Body, UploadFile, File, Form
 from fastapi.responses import HTMLResponse, FileResponse
+from typing import List
 import json
 import os
 import pdfplumber
@@ -16,13 +17,13 @@ except ImportError:
     docx2txt = None
 
 from rag_pipeline.main import run_pipeline
-from rag_pipeline.output_json import generate_run_id, write_canonical_json, CRAPP_VERSION
+from rag_pipeline.output_json import generate_run_id, write_canonical_json, RPP_VERSION
 from rag_pipeline.utils.logger import setup_logger
 from rag_pipeline.processing.sliding_window import SlidingWindowParser
 from rag_pipeline.processing.ai_client import AVAILABLE_MODELS, DEFAULT_MODEL
 from datetime import datetime, timezone
 
-app = FastAPI(title="CRAPP - Content RAG Preparation Pipeline")
+app = FastAPI(title="RPP - RAG Preparation Pipeline")
 logger = setup_logger()
 
 # Default prompts
@@ -80,7 +81,7 @@ def home():
 <!DOCTYPE html>
 <html>
 <head>
-    <title>CRaPP - Content RAG Preparation Pipeline</title>
+    <title>RPP - RAG Preparation Pipeline</title>
     <style>
         body {{ font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; margin: 0; padding: 20px; background: #f5f5f5; }}
         .container {{ max-width: 900px; margin: 0 auto; }}
@@ -107,8 +108,8 @@ def home():
 </head>
 <body>
     <div class="container">
-        <h1>CRaPP</h1>
-        <p class="subtitle">Content RAG Preparation Pipeline v{CRAPP_VERSION}</p>
+        <h1>RPP</h1>
+        <p class="subtitle">RAG Preparation Pipeline v{RPP_VERSION}</p>
 
         <details>
             <summary>Customize AI Extraction Prompts (Advanced)</summary>
@@ -145,9 +146,9 @@ def home():
         </div>
 
         <div class="card">
-            <h3>Upload Document</h3>
-            <p style="color: #666; margin-top: 0;">Supports PDF, DOCX, or TXT files</p>
-            <input type="file" id="fileInput" accept=".pdf,.docx,.txt">
+            <h3>Upload Documents</h3>
+            <p style="color: #666; margin-top: 0;">Supports PDF, DOCX, or TXT files (select multiple files for batch processing)</p>
+            <input type="file" id="fileInput" accept=".pdf,.docx,.txt" multiple>
             <br>
             <button onclick="uploadFile()">Upload & Process</button>
             <div id="uploadResult" class="result"></div>
@@ -220,17 +221,23 @@ def home():
             const resultDiv = document.getElementById('uploadResult');
 
             if (!fileInput.files.length) {{
-                alert('Please select a file first');
+                alert('Please select at least one file');
                 return;
             }}
 
+            const fileCount = fileInput.files.length;
             resultDiv.style.display = 'none';
-            resultDiv.innerHTML = 'Processing...';
+            resultDiv.innerHTML = `Processing ${{fileCount}} file(s)...`;
             resultDiv.className = 'result';
             resultDiv.style.display = 'block';
 
             const formData = new FormData();
-            formData.append('file', fileInput.files[0]);
+
+            // Append all selected files
+            for (let i = 0; i < fileInput.files.length; i++) {{
+                formData.append('files', fileInput.files[i]);
+            }}
+
             formData.append('model', document.getElementById('model').value);
             formData.append('system', document.getElementById('system').value);
             formData.append('user_template', document.getElementById('user_template').value);
@@ -247,6 +254,7 @@ def home():
                         <div class="stats">
                             Run ID: ${{data.run_id}}<br>
                             Model: ${{data.model || 'gpt-4.1'}}<br>
+                            Documents: ${{data.stats.documents_processed}}<br>
                             Sections: ${{data.stats.total_sections}}<br>
                             Time: ${{data.stats.processing_time_seconds}}s
                         </div>
@@ -317,13 +325,16 @@ def run_scrape(payload: dict = Body(...)):
 
 @app.post("/upload")
 def upload_file(
-    file: UploadFile = File(...),
+    files: List[UploadFile] = File(...),
     model: str = Form(DEFAULT_MODEL),
     system: str = Form(""),
     user_template: str = Form("")
 ):
-    """Upload and process a document (PDF, DOCX, or TXT)."""
+    """Upload and process multiple documents (PDF, DOCX, or TXT)."""
     os.makedirs("cache/raw", exist_ok=True)
+
+    if not files:
+        raise HTTPException(status_code=400, detail="No files uploaded")
 
     # Validate model
     if model not in AVAILABLE_MODELS:
@@ -333,65 +344,129 @@ def upload_file(
     if system or user_template:
         save_prompts(system or DEFAULT_SYSTEM_PROMPT, user_template or DEFAULT_USER_TEMPLATE)
 
-    # Save uploaded file
-    file_content = file.file.read()
-    file_path = os.path.join("cache/raw", file.filename)
-    with open(file_path, "wb") as f:
-        f.write(file_content)
-    logger.info(f"Uploaded file: {file_path}")
-
-    # Extract text based on file type
-    filename_lower = file.filename.lower()
-    text = ""
-
-    if filename_lower.endswith(".txt"):
-        text = file_content.decode("utf-8", errors="ignore")
-
-    elif filename_lower.endswith(".docx"):
-        if docx2txt is None:
-            raise HTTPException(status_code=500, detail="docx2txt not installed")
-        text = docx2txt.process(file_path)
-
-    elif filename_lower.endswith(".pdf"):
-        try:
-            with pdfplumber.open(io.BytesIO(file_content)) as pdf:
-                pages = [page.extract_text() or "" for page in pdf.pages]
-                text = "\n\n".join(pages)
-        except Exception as e:
-            raise HTTPException(status_code=500, detail=f"PDF parsing failed: {e}")
-
-    else:
-        raise HTTPException(status_code=400, detail="Unsupported file type. Use PDF, DOCX, or TXT.")
-
-    if not text.strip():
-        raise HTTPException(status_code=400, detail="Could not extract any text from file")
-
-    # Save extracted text
-    txt_path = file_path.rsplit(".", 1)[0] + ".txt"
-    with open(txt_path, "w", encoding="utf-8") as f:
-        f.write(text)
-
-    # Process through sliding window + AI
-    run_id = generate_run_id([file.filename])
+    # Generate run_id for all files
+    filenames = [f.filename for f in files]
+    run_id = generate_run_id(filenames)
     start_time = datetime.now(timezone.utc)
+    logger.info(f"Starting batch upload for {len(files)} file(s) with run_id={run_id}")
 
     parser = SlidingWindowParser(model=model)
-    try:
-        count, sections = parser.process_file(txt_path, "", thinker_name="Document")
-    except Exception as e:
-        logger.error(f"Processing failed: {e}")
-        raise HTTPException(status_code=500, detail=f"Processing failed: {e}")
+    documents = []
 
-    # Build canonical output
-    documents = [{
-        "uri": f"file://{file.filename}",
-        "source_type": filename_lower.split(".")[-1],
-        "cached_files": {"raw_text": txt_path},
-        "followed_from": None,
-        "sections": sections,
-        "errors": [],
-    }]
+    # Process each file
+    for file in files:
+        # Save uploaded file
+        file_content = file.file.read()
+        file_path = os.path.join("cache/raw", file.filename)
+        with open(file_path, "wb") as f:
+            f.write(file_content)
+        logger.info(f"Uploaded file: {file_path}")
 
+        # Extract text based on file type
+        filename_lower = file.filename.lower()
+        text = ""
+
+        try:
+            if filename_lower.endswith(".txt"):
+                text = file_content.decode("utf-8", errors="ignore")
+
+            elif filename_lower.endswith(".docx"):
+                if docx2txt is None:
+                    raise HTTPException(status_code=500, detail="docx2txt not installed")
+                text = docx2txt.process(file_path)
+
+            elif filename_lower.endswith(".pdf"):
+                try:
+                    with pdfplumber.open(io.BytesIO(file_content)) as pdf:
+                        pages = [page.extract_text() or "" for page in pdf.pages]
+                        text = "\n\n".join(pages)
+                except Exception as e:
+                    logger.error(f"PDF parsing failed for {file.filename}: {e}")
+                    documents.append({
+                        "uri": f"file://{file.filename}",
+                        "source_type": "pdf",
+                        "cached_files": {},
+                        "followed_from": None,
+                        "sections": [],
+                        "errors": [f"PDF parsing failed: {e}"],
+                    })
+                    continue
+
+            else:
+                logger.warning(f"Unsupported file type: {file.filename}")
+                documents.append({
+                    "uri": f"file://{file.filename}",
+                    "source_type": "unknown",
+                    "cached_files": {},
+                    "followed_from": None,
+                    "sections": [],
+                    "errors": ["Unsupported file type. Use PDF, DOCX, or TXT."],
+                })
+                continue
+
+            if not text.strip():
+                logger.warning(f"No text extracted from {file.filename}")
+                documents.append({
+                    "uri": f"file://{file.filename}",
+                    "source_type": filename_lower.split(".")[-1],
+                    "cached_files": {},
+                    "followed_from": None,
+                    "sections": [],
+                    "errors": ["Could not extract any text from file"],
+                })
+                continue
+
+            # Save extracted text
+            txt_path = file_path.rsplit(".", 1)[0] + ".txt"
+            with open(txt_path, "w", encoding="utf-8") as f:
+                f.write(text)
+
+            # Determine thinker_name based on file type for source-aware prompts
+            if filename_lower.endswith(".docx"):
+                thinker_name = "DOCX"
+            elif filename_lower.endswith(".pdf"):
+                thinker_name = "PDF"
+            else:
+                thinker_name = "default"
+
+            # Process through sliding window + AI
+            try:
+                count, sections = parser.process_file(txt_path, "", thinker_name=thinker_name)
+                logger.info(f"Processed {file.filename}: {len(sections)} sections")
+            except Exception as e:
+                logger.error(f"Processing failed for {file.filename}: {e}")
+                documents.append({
+                    "uri": f"file://{file.filename}",
+                    "source_type": filename_lower.split(".")[-1],
+                    "cached_files": {"raw_text": txt_path},
+                    "followed_from": None,
+                    "sections": [],
+                    "errors": [f"Processing failed: {e}"],
+                })
+                continue
+
+            # Add document to collection
+            documents.append({
+                "uri": f"file://{file.filename}",
+                "source_type": filename_lower.split(".")[-1],
+                "cached_files": {"raw_text": txt_path},
+                "followed_from": None,
+                "sections": sections,
+                "errors": [],
+            })
+
+        except Exception as e:
+            logger.error(f"Unexpected error processing {file.filename}: {e}")
+            documents.append({
+                "uri": f"file://{file.filename}",
+                "source_type": filename_lower.split(".")[-1] if "." in filename_lower else "unknown",
+                "cached_files": {},
+                "followed_from": None,
+                "sections": [],
+                "errors": [f"Unexpected error: {e}"],
+            })
+
+    # Write single canonical JSON with all documents
     result = write_canonical_json(
         run_id=run_id,
         run_mode="ai_always",
@@ -402,6 +477,8 @@ def upload_file(
         start_time=start_time,
         model_hint=model,
     )
+
+    logger.info(f"Batch upload complete: {result['output_path']}")
 
     return {
         "status": "completed",
@@ -430,4 +507,4 @@ def download_output(run_id: str):
 
 @app.get("/health")
 def health_check():
-    return {"health": "ok", "version": CRAPP_VERSION}
+    return {"health": "ok", "version": RPP_VERSION}
