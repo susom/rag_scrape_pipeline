@@ -1,19 +1,32 @@
-# CRAPP - Content RAG Preparation Pipeline
+# RPP - RAG Preparation Pipeline
 
 A modular pipeline for scraping, parsing, and processing content into RAG-ready JSON artifacts.
 
-**Primary Interface: Web API** at `localhost:9090`
+**Production:** `https://rag-scrape-pipeline-974351967139.us-west1.run.app`
+**Local:** `http://localhost:9090`
+**Source:** https://github.com/susom/rag_scrape_pipeline
 
 ## Features
 
-- Web API with HTML UI for interactive processing
-- URL scraping (HTML snapshots, main content extraction, PDF detection)
-- PDF parsing (via `pdfplumber`)
-- Local caching (`cache/raw` for raw HTML/PDF text)
-- Sliding window processing via SecureChatAI (REDCap proxy)
-- Deduplication & canonical JSON output (`cache/rag_ready`)
-- GCS storage integration (optional)
-- Modular design (`rag_pipeline/` package with submodules)
+- **Web API** with HTML UI for interactive processing
+- **URL scraping** (HTML snapshots, main content extraction, PDF/DOCX attachment detection)
+- **Batch document upload** (multiple PDF, DOCX, TXT files in one operation)
+- **Link following**:
+  - Web URLs: Follow PDF/DOCX attachments in main content
+  - Uploaded docs: Extract and scrape web links - supports both HTML and PDF URLs (optional, 1 level deep, rate-limited)
+- **Source-aware AI extraction**:
+  - **Web pages**: Remove structural cruft (nav, ads, scripts), preserve policy content
+  - **Uploaded docs**: Conservative preservation of all substantive content
+  - **Critical**: Preserves metadata labels and dry regulatory language
+- **AI-powered content filtering** via SecureChatAI gateway
+- **Multi-model support** (GPT-4.1, Claude, Gemini, Llama, DeepSeek, etc.)
+- **PDF parsing** (via `pdfplumber`)
+- **Local caching** (`cache/raw` for raw HTML/PDF text)
+- **Sliding window processing** with deduplication
+- **Canonical JSON output** (`cache/rag_ready/{run_id}.json`)
+- **GCS storage** integration (optional)
+- **SharePoint integration** (input/output storage, automation)
+- **CI/CD deployment** (auto-deploy on git push)
 
 ---
 
@@ -55,10 +68,14 @@ docker-compose up
 ```
 
 The web UI allows you to:
-- Enter URLs to process
-- Configure prompts
-- Toggle link-following
-- Upload documents (PDF, DOCX, TXT)
+- **Process URLs**: Enter web URLs with optional PDF/DOCX attachment following
+- **Upload documents**: PDF, DOCX, TXT files (batch upload supported)
+- **Follow web links in documents**: Optional checkbox to extract and scrape URLs found in uploaded files (1 level deep)
+  - ⚠️ Large batches with link following can take 30-60+ minutes
+  - UI warns when uploading >3 files with link following enabled
+  - Server timeout: 2 hours (sufficient for very large batches)
+- **Configure prompts**: Customize AI extraction behavior
+- **Select AI model**: Choose from multiple available models
 
 ### API Endpoints
 
@@ -73,14 +90,27 @@ Response:
 ```json
 {
   "status": "completed",
-  "run_id": "crapp_2026-01-06T18-30-00Z_a1b2c3d4",
-  "output_path": "cache/rag_ready/crapp_2026-01-06T18-30-00Z_a1b2c3d4.json",
+  "run_id": "rpp_2026-01-06T18-30-00Z_a1b2c3d4",
+  "output_path": "cache/rag_ready/rpp_2026-01-06T18-30-00Z_a1b2c3d4.json",
   "stats": {"documents_processed": 1, "total_sections": 5, ...},
   "warnings": []
 }
 ```
 
-**POST /upload** - Upload and process a document
+**POST /upload** - Upload and process documents
+```bash
+curl -X POST http://localhost:9090/upload \
+  -F "files=@document.docx" \
+  -F "follow_doc_links=true" \
+  -F "model=gpt-4.1"
+```
+Parameters:
+- `files`: One or more files (PDF, DOCX, TXT)
+- `follow_doc_links`: Extract and scrape URLs found in documents (optional, default: false)
+  - Max 20 URLs per document, 2-second delay between requests (rate limiting)
+- `model`: AI model to use (optional)
+
+**GET /download/{run_id}** - Download JSON output for a run
 
 **GET /health** - Health check
 
@@ -95,16 +125,16 @@ docker-compose run --rm scraper python -m rag_pipeline.main
 
 ## Output Format
 
-CRAPP produces a single canonical JSON file per run at `cache/rag_ready/{run_id}.json`.
+RPP produces a single canonical JSON file per run at `cache/rag_ready/{run_id}.json`.
 
-Schema version: `crapp.v1`
+Schema version: `rpp.v1`
 
 ```json
 {
-  "schema_version": "crapp.v1",
-  "crapp_version": "0.2.0",
+  "schema_version": "rpp.v1",
+  "rpp_version": "0.2.0",
   "run": {
-    "run_id": "crapp_2026-01-06T18-30-00Z_a1b2c3d4",
+    "run_id": "rpp_2026-01-06T18-30-00Z_a1b2c3d4",
     "timestamp_start": "2026-01-06T18:30:00Z",
     "timestamp_end": "2026-01-06T18:32:15Z",
     "triggered_by": "web_api",
@@ -165,10 +195,119 @@ Schema version: `crapp.v1`
 
 ---
 
+## Production Deployment (Cloud Run)
+
+**⚠️ CRITICAL:** When deploying to Cloud Run, you must increase the request timeout from the default 5 minutes to 60 minutes to support link-following operations.
+
+**Via Google Cloud Console:**
+1. Go to Cloud Run → Select your service
+2. "Edit & Deploy New Revision" → "Container" tab
+3. Set "Request timeout" to **3600** seconds
+4. Deploy
+
+**Via gcloud CLI:**
+```bash
+gcloud run services update YOUR_SERVICE_NAME --timeout=3600 --region=YOUR_REGION
+```
+
+Without this change, link-following operations on large batches will timeout and fail.
+
+---
+
+## Recent Updates
+
+### Bug Fixes (2026-01-14)
+
+**Problem:** Followed web links were being skipped, causing content loss for Stanford policy pages.
+
+**Root Causes:**
+1. Field name typo in validation logic (`content` vs `text`)
+2. Over-aggressive AI prompts removing dry regulatory language
+3. Missing metadata label preservation
+
+**Fixes:**
+1. ✅ Fixed field name in content validation (web.py, main.py)
+2. ✅ Updated AI prompts to explicitly preserve policy content and metadata labels
+3. ✅ Migrated to source-type-specific prompts (WebPage, DOCX, PDF, default)
+4. ✅ Added web link following to core pipeline (main.py)
+
+**Impact:** Followed URLs now correctly preserve Stanford policy content.
+
+**Files Modified:**
+- `rag_pipeline/web.py` - Fixed validation, preserved AI processing for followed links
+- `rag_pipeline/processing/sliding_window.py` - Updated default prompts
+- `rag_pipeline/main.py` - Added "web" follow mode
+- `config/sliding_window_prompts.json` - Nested structure with source-specific prompts
+
+---
+
+## AI Extraction Philosophy
+
+The pipeline uses **source-type-aware extraction** to apply the right level of filtering:
+
+**Web Pages (URL scraping):**
+- ✅ **PRESERVE:** All policy content (even if dry/formal), metadata labels
+- ❌ **REMOVE:** Navigation, menus, headers, footers, ads, scripts, exact duplicates
+- Note: "Boilerplate" terminology removed - regulatory language is NOT boilerplate
+
+**Uploaded Documents (DOCX, PDF, TXT):**
+- ✅ **PRESERVE:** ALL substantive content, references, citations, links, tables, metadata labels
+- ❌ **REMOVE ONLY:** Format artifacts, OCR errors, page numbers, corrupted characters
+
+**Followed Web Links:**
+- Process with "WebPage" prompts (same as URL scraping)
+- Rate limited: max 20 URLs per document, 2-second delay
+
+**Prompts:** Configured in `config/sliding_window_prompts.json` with nested structure.
+
+---
+
+## SharePoint Integration
+
+The pipeline integrates with SharePoint for input/output storage and automation:
+
+**Input Sources:**
+- **Source Documents** library: DOCX, PDF, TXT files to process
+- **Source URLs** library: `.txt` files with URL lists (one per line)
+
+**Outputs:**
+- **Pipeline Outputs** library: Generated JSON files organized by date
+- **Processing Log** list: Metadata tracking (run_id, timestamp, status, files processed)
+
+**Automation Strategies:**
+- **Power Automate**: Monitor SharePoint libraries for changes, trigger processing
+- **Delta Detection**: Track file modification dates and content hashes to skip unchanged content
+- **Scheduled Runs**: Weekly/daily processing of URL lists with delta checking
+
+**Benefits:**
+- Centralized document storage
+- Audit trail and version control via SharePoint
+- Automated processing on file updates
+- 70-90% reduction in redundant processing
+
+See SharePoint wiki page for detailed integration workflows.
+
+---
+
 ## Run Modes
 
 | Mode | Description |
 |------|-------------|
-| `deterministic` | Pure text extraction, no AI calls (default) |
+| `ai_always` | Every chunk passes through AI normalization (recommended) |
+| `deterministic` | Pure text extraction, no AI calls |
 | `ai_auto` | AI triggered by noise detection heuristics |
-| `ai_always` | Every chunk passes through AI normalization |
+
+---
+
+## Deployment
+
+**CI/CD:** Automated via GitHub Actions
+```
+git push → GitHub Actions → Docker build → Cloud Run deployment
+```
+
+**Repository:** https://github.com/susom/rag_scrape_pipeline
+
+**Production URL:** https://rag-scrape-pipeline-974351967139.us-west1.run.app
+
+**Rollback:** Revert commit or redeploy specific tag via Cloud Run console

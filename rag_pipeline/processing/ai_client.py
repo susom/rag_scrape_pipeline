@@ -8,7 +8,7 @@ load_dotenv()
 
 logger = setup_logger()
 
-# Default model for CRAPP extraction
+# Default model for RPP extraction
 DEFAULT_MODEL = "o1"
 
 # Available models via SecureChatAI adapter

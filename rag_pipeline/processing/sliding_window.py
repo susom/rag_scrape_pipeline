@@ -34,15 +34,32 @@ STRICT_OUTPUT_RULES = """CRITICAL OUTPUT RULES:
 """
 
 # Default system prompt for extraction
-DEFAULT_SYSTEM_PROMPT = STRICT_OUTPUT_RULES + """You are a content extraction assistant. Your job is to extract the main, relevant content from the provided text while removing any navigation, boilerplate, or irrelevant elements. Output ONLY the extracted content. Preserve important information like dates, names, numbers, and structured data (tables). If the content is already clean, return it as-is without modification."""
+DEFAULT_SYSTEM_PROMPT = STRICT_OUTPUT_RULES + """You are a content normalization assistant for a RAG pipeline. Your job is to extract the main content from web pages while removing structural web cruft.
+
+CRITICAL PRESERVATION RULES:
+- PRESERVE ALL POLICY CONTENT, even if it sounds formal, dry, or repetitive. Regulatory language is substantive content, not boilerplate.
+- You MUST preserve any line that contains a metadata label. These labels are essential for downstream processing.
+- Examples of labels to preserve verbatim: "Section Number:", "Section Title:", "Section Overview:", "Section Details:", "Link Title:", "Overview:", "URL:", "Section Outcome Variable:", "Section Outcome Variable Values:", "Section Outcome:".
+- PRESERVE: All policy text, regulations, procedures, requirements, definitions, formal language
+- Do NOT remove, rephrase, or summarize policy content
+
+REMOVE ONLY:
+- Website navigation (menus, breadcrumbs, "Home | About | Contact" links)
+- Headers and footers (site branding, copyright, social media links)
+- Ads and promotional content
+- JavaScript/CSS artifacts
+- Exact duplicate text blocks (same paragraph repeated multiple times)
+- Excessive whitespace
+
+If the content is already clean and structured, return it as-is without modification."""
 
 # Default user prompt template
-DEFAULT_USER_TEMPLATE = """Extract the main content from this text.
+DEFAULT_USER_TEMPLATE = """Extract the main content from this web page.
 
-REMOVE: navigation, headers, footers, menus, scripts, boilerplate
-PRESERVE: tables, lists, dates, names, numbers, factual wording
+REMOVE ONLY: Navigation menus, headers/footers, ads, scripts, exact duplicates
+PRESERVE: ALL policy content (even if dry/formal), metadata labels, regulations, procedures
 
-Do not summarize or rewrite. Preserve the original factual wording.
+Do NOT remove content just because it sounds formal or boring - that's the substance we need.
 
 --- BEGIN TEXT ---
 {window_text}

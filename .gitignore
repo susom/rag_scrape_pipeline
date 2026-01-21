@@ -74,3 +74,6 @@ config/urls.txt
 CLAUDE.md
 som-rit-*.json
 curl.txt
+/logs
+CAPPY.md
+.cappyignore

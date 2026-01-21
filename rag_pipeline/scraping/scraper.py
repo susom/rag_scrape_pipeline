@@ -1,5 +1,5 @@
 """
-Web scraper for CRAPP pipeline.
+Web scraper for RPP pipeline.
 Extracts main content and attachment links from web pages.
 """
 
@@ -9,6 +9,7 @@ import requests
 from bs4 import BeautifulSoup
 from urllib.parse import urljoin, urlparse
 from rag_pipeline.utils.logger import setup_logger
+from rag_pipeline.scraping.pdf_parser import process_pdfs
 
 logger = setup_logger()
 
@@ -158,6 +159,28 @@ def scrape_page(url: str, session: requests.Session) -> dict:
     try:
         resp = session.get(url, timeout=15)
         resp.raise_for_status()
+
+        # Check if this is a PDF (by URL extension or Content-Type header)
+        content_type = resp.headers.get("Content-Type", "").lower()
+        is_pdf = url.lower().endswith(".pdf") or "application/pdf" in content_type
+
+        if is_pdf:
+            # Handle PDF separately using PDF parser
+            logger.info(f"Detected PDF at {url}, using PDF parser")
+            pdf_text = process_pdfs(url)
+
+            if pdf_text:
+                result["text"] = pdf_text
+                result["cached_path"] = save_text_locally(url, pdf_text)
+                logger.info(f"Parsed PDF {url}: {len(pdf_text)} chars")
+            else:
+                logger.warning(f"PDF parser returned empty text for {url}")
+                result["error"] = "PDF parsing returned no text"
+
+            # PDFs don't have attachments to extract
+            return result
+
+        # Handle HTML pages
         soup = BeautifulSoup(resp.text, "lxml")
 
         # Find main content element

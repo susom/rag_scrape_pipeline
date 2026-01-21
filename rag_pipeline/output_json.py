@@ -1,6 +1,6 @@
 """
-Canonical JSON output writer for CRAPP pipeline.
-Produces crapp.v1 schema artifacts.
+Canonical JSON output writer for RPP pipeline.
+Produces rpp.v1 schema artifacts.
 """
 
 import os
@@ -12,7 +12,7 @@ from typing import Optional
 from rag_pipeline.processing.ai_client import DEFAULT_MODEL
 
 # Pipeline version - update on releases
-CRAPP_VERSION = "0.2.0"
+RPP_VERSION = "0.2.0"
 
 
 def _sha256(data: str) -> str:
@@ -44,7 +44,7 @@ def write_canonical_json(
     model_hint: Optional[str] = None,
 ) -> dict:
     """
-    Write canonical crip.v1 JSON artifact.
+    Write canonical rpp.v1 JSON artifact.
 
     Args:
         run_id: Unique run identifier (computed at entrypoint)
@@ -144,8 +144,8 @@ def write_canonical_json(
 
     # Assemble canonical output
     canonical_output = {
-        "schema_version": "crapp.v1",
-        "crapp_version": CRAPP_VERSION,
+        "schema_version": "rpp.v1",
+        "rpp_version": RPP_VERSION,
         "run": {
             "run_id": run_id,
             "timestamp_start": start_time.isoformat(),
@@ -186,8 +186,8 @@ def generate_run_id(input_uris: list[str]) -> str:
     """
     Generate deterministic run ID from timestamp and input URIs.
 
-    Format: crapp_YYYY-MM-DDTHH-MM-SSZ_XXXXXXXX
+    Format: rpp_YYYY-MM-DDTHH-MM-SSZ_XXXXXXXX
     """
     timestamp = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H-%M-%SZ")
     uri_hash = _sha256("".join(sorted(input_uris)))[:8]
-    return f"crapp_{timestamp}_{uri_hash}"
+    return f"rpp_{timestamp}_{uri_hash}"

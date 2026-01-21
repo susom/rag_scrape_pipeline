@@ -1,5 +1,5 @@
 """
-CRAPP - Main orchestration module.
+RPP - Main orchestration module.
 
 Provides:
 - run_pipeline(): Core pipeline function for programmatic use
@@ -9,6 +9,8 @@ Provides:
 import os
 import csv
 import hashlib
+import re
+import time
 from datetime import datetime, timezone
 from typing import Literal
 
@@ -23,7 +25,41 @@ from rag_pipeline.output_json import write_canonical_json, generate_run_id
 logger = setup_logger()
 
 # Follow mode type
-FollowMode = Literal["none", "attachments"]
+FollowMode = Literal["none", "attachments", "web"]
+
+# Link following configuration
+MAX_FOLLOWED_URLS_PER_DOC = 20  # Maximum URLs to follow per document
+URL_FOLLOW_DELAY_SECONDS = 2     # Delay between processing each followed URL (rate limiting)
+
+
+def extract_urls_from_text(text: str) -> list[str]:
+    """
+    Extract unique http/https URLs from text.
+
+    Returns:
+        List of unique URLs found in the text.
+    """
+    # Regex pattern for http/https URLs
+    # Matches URLs with proper structure, avoiding common false positives
+    url_pattern = r'https?://[^\s<>"{}|\\^`\[\]]+'
+
+    urls = re.findall(url_pattern, text)
+
+    # Remove trailing punctuation that's likely not part of the URL
+    cleaned_urls = []
+    for url in urls:
+        url = url.rstrip('.,;:!?)')
+        cleaned_urls.append(url)
+
+    # Deduplicate while preserving order
+    seen = set()
+    unique_urls = []
+    for url in cleaned_urls:
+        if url not in seen:
+            seen.add(url)
+            unique_urls.append(url)
+
+    return unique_urls
 
 
 def run_pipeline(
@@ -37,15 +73,16 @@ def run_pipeline(
     model: str | None = None,
 ) -> dict:
     """
-    Run the CRAPP pipeline on a list of URLs.
+    Run the RPP pipeline on a list of URLs.
 
     Args:
         urls: List of URLs to process
         run_id: Unique run identifier (from generate_run_id())
         follow_links: Legacy param - if False, sets follow_mode="none"
-        follow_mode: "none" | "attachments" - controls what gets followed
+        follow_mode: "none" | "attachments" | "web" - controls what gets followed
             - "none": Don't follow any links
             - "attachments": Follow PDF/DOC/DOCX links found in main content only
+            - "web": Follow http/https URLs found in scraped text (1 level deep)
         run_mode: "deterministic" | "ai_auto" | "ai_always"
         triggered_by: "web_api" | "cli" | "main"
         tags: Optional run-level tags
@@ -90,6 +127,96 @@ def run_pipeline(
             warnings=warnings,
         )
         documents.append(page_doc)
+
+        # --- Process web links found in the main page text ---
+        if follow_mode == "web" and page_doc["sections"]:
+            # Extract text from all sections
+            page_text = " ".join(section.get("text", "") for section in page_doc["sections"])
+
+            if page_text:
+                extracted_urls = extract_urls_from_text(page_text)
+                logger.info(f"Found {len(extracted_urls)} URL(s) in {url}")
+
+                # Apply rate limiting: cap max URLs to follow
+                if len(extracted_urls) > MAX_FOLLOWED_URLS_PER_DOC:
+                    logger.warning(
+                        f"Page has {len(extracted_urls)} URLs. Limiting to first {MAX_FOLLOWED_URLS_PER_DOC} "
+                        f"to prevent excessive processing."
+                    )
+                    extracted_urls = extracted_urls[:MAX_FOLLOWED_URLS_PER_DOC]
+
+                for idx, followed_url in enumerate(extracted_urls):
+                    try:
+                        logger.info(f"Following URL from {url}: {followed_url}")
+
+                        # Scrape the URL (no attachment following - only 1 level deep)
+                        followed_scrape = scrape_url(followed_url, follow_attachments=False)
+
+                        # Skip if scraping failed
+                        if followed_scrape.get("error"):
+                            logger.warning(f"Skipping {followed_url}: {followed_scrape['error']}")
+                            continue
+
+                        # Get the raw, cleaned text from the scraper
+                        followed_text = followed_scrape.get("text", "")
+
+                        # Skip if no content extracted
+                        if not followed_text or len(followed_text.strip()) < 100:
+                            logger.warning(
+                                f"Skipping {followed_url}: No meaningful content extracted "
+                                f"(length < 100 chars)"
+                            )
+                            continue
+
+                        # Save the scraped text
+                        followed_filename = url_to_filename(followed_url, ext="followed.txt")
+                        followed_path = os.path.join(raw_dir, followed_filename)
+                        storage.save_file(followed_path, followed_text)
+
+                        # Process through AI with WebPage prompts (aggressive filtering)
+                        # Followed web links are web pages - treat them like Path 1 (web URL scrape)
+                        try:
+                            count, followed_sections = parser.process_file(
+                                followed_path, "", thinker_name="WebPage"
+                            )
+
+                            # Skip if AI processing resulted in no sections or minimal content
+                            # NOTE: Use "text" field, not "content" (original bug)
+                            total_content = sum(len(s.get("text", "")) for s in followed_sections)
+                            if not followed_sections or total_content < 100:
+                                logger.warning(
+                                    f"Skipping {followed_url}: AI processing produced insufficient content "
+                                    f"({total_content} chars, likely bot page/error)"
+                                )
+                                continue
+
+                            logger.info(
+                                f"Successfully processed followed URL {followed_url}: "
+                                f"{len(followed_sections)} sections"
+                            )
+
+                            # Add followed URL as a document
+                            documents.append({
+                                "uri": followed_url,
+                                "source_type": "webpage",
+                                "cached_files": {"raw_text": followed_path},
+                                "followed_from": url,
+                                "sections": followed_sections,
+                                "errors": [],
+                            })
+
+                        except Exception as e:
+                            logger.warning(f"AI processing failed for {followed_url}: {e}, skipping")
+                            continue
+
+                    except Exception as e:
+                        logger.warning(f"Failed to process {followed_url}: {e}, skipping")
+                        continue
+
+                    # Rate limiting: sleep between URL requests (except after last one)
+                    if idx < len(extracted_urls) - 1:
+                        logger.debug(f"Rate limiting: sleeping {URL_FOLLOW_DELAY_SECONDS}s before next URL")
+                        time.sleep(URL_FOLLOW_DELAY_SECONDS)
 
         # --- Process attachments as separate documents ---
         if follow_mode == "attachments" and scrape_result["attachments"]:

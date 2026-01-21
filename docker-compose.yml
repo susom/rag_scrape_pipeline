@@ -12,4 +12,4 @@ services:
       - .env
     stdin_open: true
     tty: true
-    command: uvicorn rag_pipeline.web:app --host 0.0.0.0 --port 8080 --reload
+    command: uvicorn rag_pipeline.web:app --host 0.0.0.0 --port 8080 --reload --timeout-keep-alive 7200

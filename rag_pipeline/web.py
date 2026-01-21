@@ -8,8 +8,11 @@ from fastapi.responses import HTMLResponse, FileResponse
 from typing import List
 import json
 import os
+import re
+import time
 import pdfplumber
 import io
+import hashlib
 
 try:
     import docx2txt
@@ -21,10 +24,33 @@ from rag_pipeline.output_json import generate_run_id, write_canonical_json, RPP_
 from rag_pipeline.utils.logger import setup_logger
 from rag_pipeline.processing.sliding_window import SlidingWindowParser
 from rag_pipeline.processing.ai_client import AVAILABLE_MODELS, DEFAULT_MODEL
+from rag_pipeline.scraping.scraper import scrape_url
 from datetime import datetime, timezone
 
 app = FastAPI(title="RPP - RAG Preparation Pipeline")
 logger = setup_logger()
+
+# Link following configuration
+MAX_FOLLOWED_URLS_PER_DOC = 20  # Maximum URLs to follow per uploaded document
+URL_FOLLOW_DELAY_SECONDS = 2     # Delay between processing each followed URL (rate limiting)
+MIN_CONTENT_LENGTH_SCRAPED = 100  # Minimum chars after scraping (pre-AI check)
+MIN_CONTENT_LENGTH_AI = 200       # Minimum chars after AI extraction (post-AI check)
+
+# Bot detection keywords (case-insensitive)
+BOT_DETECTION_KEYWORDS = [
+    "captcha",
+    "bot test",
+    "request access",
+    "are you a robot",
+    "verify you are human",
+    "automated scraping",
+    "recaptcha",
+    "cloudflare",
+    "access denied",
+    "403 forbidden",
+    "enable javascript to continue",
+    "please enable cookies",
+]
 
 # Default prompts
 DEFAULT_SYSTEM_PROMPT = """You are a content extraction assistant. Your job is to extract the main, relevant content from the provided text while removing any navigation, boilerplate, or irrelevant elements. Output ONLY the extracted content - no explanations, no commentary, no JSON wrapping. Preserve important information like dates, names, numbers, and structured data (tables). If the content is already clean, return it as-is without modification."""
@@ -65,6 +91,61 @@ def save_prompts(system: str, user_template: str):
     os.makedirs("config", exist_ok=True)
     with open("config/sliding_window_prompts.json", "w", encoding="utf-8") as f:
         json.dump({"system": system, "user_template": user_template}, f, ensure_ascii=False, indent=2)
+
+
+def is_bot_detection_page(text: str) -> bool:
+    """
+    Check if the scraped text appears to be a bot detection/CAPTCHA page.
+
+    Args:
+        text: The scraped text content
+
+    Returns:
+        True if text matches bot detection patterns, False otherwise
+    """
+    if not text:
+        return False
+
+    text_lower = text.lower()
+
+    # Check for bot detection keywords
+    for keyword in BOT_DETECTION_KEYWORDS:
+        if keyword in text_lower:
+            # Additional heuristic: if keyword appears and content is short, likely a bot page
+            if len(text.strip()) < 2000:
+                return True
+
+    return False
+
+
+def extract_urls_from_text(text: str) -> list[str]:
+    """
+    Extract unique http/https URLs from text.
+
+    Returns:
+        List of unique URLs found in the text.
+    """
+    # Regex pattern for http/https URLs
+    # Matches URLs with proper structure, avoiding common false positives
+    url_pattern = r'https?://[^\s<>"{}|\\^`\[\]]+'
+
+    urls = re.findall(url_pattern, text)
+
+    # Remove trailing punctuation that's likely not part of the URL
+    cleaned_urls = []
+    for url in urls:
+        url = url.rstrip('.,;:!?)')
+        cleaned_urls.append(url)
+
+    # Deduplicate while preserving order
+    seen = set()
+    unique_urls = []
+    for url in cleaned_urls:
+        if url not in seen:
+            seen.add(url)
+            unique_urls.append(url)
+
+    return unique_urls
 
 
 @app.get("/", response_class=HTMLResponse)
@@ -149,13 +230,42 @@ def home():
             <h3>Upload Documents</h3>
             <p style="color: #666; margin-top: 0;">Supports PDF, DOCX, or TXT files (select multiple files for batch processing)</p>
             <input type="file" id="fileInput" accept=".pdf,.docx,.txt" multiple>
-            <br>
+
+            <div style="margin: 15px 0; display: flex; align-items: center; gap: 8px;">
+                <input type="checkbox" id="follow_doc_links">
+                <label class="checkbox-label" for="follow_doc_links">Follow web links found in documents (1 level deep)</label>
+            </div>
+
+            <p style="color: #f57c00; font-size: 13px; margin: 10px 0; display: none;" id="linkFollowWarning">
+                ⚠️ Link following can take significant time (2s delay per URL, max 20 URLs/file).
+                Large batches with link following may take 30+ minutes. Consider processing in smaller batches.
+            </p>
+
             <button onclick="uploadFile()">Upload & Process</button>
             <div id="uploadResult" class="result"></div>
         </div>
     </div>
 
     <script>
+        // Show/hide link following warning based on checkbox and file count
+        function updateLinkFollowWarning() {{
+            const followCheckbox = document.getElementById('follow_doc_links');
+            const fileInput = document.getElementById('fileInput');
+            const warning = document.getElementById('linkFollowWarning');
+
+            if (followCheckbox.checked && fileInput.files.length > 3) {{
+                warning.style.display = 'block';
+            }} else {{
+                warning.style.display = 'none';
+            }}
+        }}
+
+        // Attach event listeners
+        document.addEventListener('DOMContentLoaded', function() {{
+            document.getElementById('follow_doc_links').addEventListener('change', updateLinkFollowWarning);
+            document.getElementById('fileInput').addEventListener('change', updateLinkFollowWarning);
+        }});
+
         async function runPipeline() {{
             const btn = document.getElementById('runBtn');
             const resultDiv = document.getElementById('urlResult');
@@ -226,8 +336,17 @@ def home():
             }}
 
             const fileCount = fileInput.files.length;
+            const followLinks = document.getElementById('follow_doc_links').checked;
+
             resultDiv.style.display = 'none';
-            resultDiv.innerHTML = `Processing ${{fileCount}} file(s)...`;
+
+            // Show detailed message based on options
+            let processingMsg = `Processing ${{fileCount}} file(s)...`;
+            if (followLinks) {{
+                processingMsg += `<br><small style="color: #666;">Extracting and following web links from documents (this may take longer)...</small>`;
+            }}
+
+            resultDiv.innerHTML = processingMsg;
             resultDiv.className = 'result';
             resultDiv.style.display = 'block';
 
@@ -241,24 +360,37 @@ def home():
             formData.append('model', document.getElementById('model').value);
             formData.append('system', document.getElementById('system').value);
             formData.append('user_template', document.getElementById('user_template').value);
+            formData.append('follow_doc_links', document.getElementById('follow_doc_links').checked);
 
             try {{
                 const res = await fetch('/upload', {{ method: 'POST', body: formData }});
                 const data = await res.json();
 
                 if (res.ok) {{
-                    resultDiv.className = 'result';
-                    resultDiv.innerHTML = `
+                    const uploadedFiles = fileCount;
+                    const totalDocs = data.stats.documents_processed;
+                    const followedDocs = totalDocs - uploadedFiles;
+
+                    let statsHtml = `
                         <strong>Success!</strong><br>
                         <a href="/download/${{data.run_id}}" target="_blank">Download JSON</a><br>
                         <div class="stats">
                             Run ID: ${{data.run_id}}<br>
                             Model: ${{data.model || 'gpt-4.1'}}<br>
-                            Documents: ${{data.stats.documents_processed}}<br>
+                            Documents: ${{totalDocs}}`;
+
+                    if (followLinks && followedDocs > 0) {{
+                        statsHtml += ` (${{uploadedFiles}} uploaded + ${{followedDocs}} followed URLs)`;
+                    }}
+
+                    statsHtml += `<br>
                             Sections: ${{data.stats.total_sections}}<br>
                             Time: ${{data.stats.processing_time_seconds}}s
                         </div>
                     `;
+
+                    resultDiv.className = 'result';
+                    resultDiv.innerHTML = statsHtml;
                 }} else {{
                     resultDiv.className = 'result error';
                     resultDiv.innerHTML = `<strong>Error:</strong> ${{data.detail || 'Unknown error'}}`;
@@ -328,7 +460,8 @@ def upload_file(
     files: List[UploadFile] = File(...),
     model: str = Form(DEFAULT_MODEL),
     system: str = Form(""),
-    user_template: str = Form("")
+    user_template: str = Form(""),
+    follow_doc_links: str = Form("false")
 ):
     """Upload and process multiple documents (PDF, DOCX, or TXT)."""
     os.makedirs("cache/raw", exist_ok=True)
@@ -343,6 +476,10 @@ def upload_file(
     # Save custom prompts if provided
     if system or user_template:
         save_prompts(system or DEFAULT_SYSTEM_PROMPT, user_template or DEFAULT_USER_TEMPLATE)
+
+    # Convert follow_doc_links to boolean
+    follow_doc_links_bool = str(follow_doc_links).lower() == "true"
+    logger.info(f"Link following for uploaded documents: {follow_doc_links_bool}")
 
     # Generate run_id for all files
     filenames = [f.filename for f in files]
@@ -446,14 +583,105 @@ def upload_file(
                 continue
 
             # Add document to collection
+            file_uri = f"file://{file.filename}"
             documents.append({
-                "uri": f"file://{file.filename}",
+                "uri": file_uri,
                 "source_type": filename_lower.split(".")[-1],
                 "cached_files": {"raw_text": txt_path},
                 "followed_from": None,
                 "sections": sections,
                 "errors": [],
             })
+
+            # Follow URLs found in document if enabled
+            if follow_doc_links_bool and text:
+                extracted_urls = extract_urls_from_text(text)
+                logger.info(f"Found {len(extracted_urls)} URL(s) in {file.filename}")
+
+                # Apply rate limiting: cap max URLs to follow
+                if len(extracted_urls) > MAX_FOLLOWED_URLS_PER_DOC:
+                    logger.warning(
+                        f"Document has {len(extracted_urls)} URLs. Limiting to first {MAX_FOLLOWED_URLS_PER_DOC} "
+                        f"to prevent excessive API usage."
+                    )
+                    extracted_urls = extracted_urls[:MAX_FOLLOWED_URLS_PER_DOC]
+
+                for idx, url in enumerate(extracted_urls):
+                    try:
+                        logger.info(f"Following URL from {file.filename}: {url}")
+
+                        # Scrape the URL (no attachment following - only 1 level deep)
+                        scrape_result = scrape_url(url, follow_attachments=False)
+
+                        # Skip if scraping failed
+                        if scrape_result.get("error"):
+                            logger.warning(f"Skipping {url}: {scrape_result['error']}")
+                            continue
+
+                        # Get the raw, cleaned text from the scraper
+                        url_text = scrape_result.get("text", "")
+
+                        # Skip if no content extracted (pre-AI check)
+                        if not url_text or len(url_text.strip()) < MIN_CONTENT_LENGTH_SCRAPED:
+                            logger.warning(
+                                f"Skipping {url}: No meaningful content extracted after scraping "
+                                f"({len(url_text.strip())} chars < {MIN_CONTENT_LENGTH_SCRAPED})"
+                            )
+                            continue
+
+                        # Skip if bot detection page (CAPTCHA, access denied, etc.)
+                        if is_bot_detection_page(url_text):
+                            logger.warning(
+                                f"Skipping {url}: Detected bot detection/CAPTCHA page "
+                                f"(keywords: {', '.join([k for k in BOT_DETECTION_KEYWORDS if k in url_text.lower()][:3])})"
+                            )
+                            continue
+
+                        # Save the scraped text
+                        url_safe_name = url.replace("https://", "").replace("http://", "").replace("/", "_")[:80]
+                        url_txt_path = os.path.join("cache/raw", f"{url_safe_name}_followed.txt")
+                        with open(url_txt_path, "w", encoding="utf-8") as f:
+                            f.write(url_text)
+
+                        # Process through AI with WebPage prompts (aggressive filtering)
+                        # Followed web links are web pages - treat them like Path 1 (web URL scrape)
+                        try:
+                            count, url_sections = parser.process_file(url_txt_path, "", thinker_name="WebPage")
+
+                            # Skip if AI processing resulted in no sections or minimal content (post-AI check)
+                            # NOTE: Use "text" field, not "content" (original bug)
+                            total_content = sum(len(s.get("text", "")) for s in url_sections)
+                            if not url_sections or total_content < MIN_CONTENT_LENGTH_AI:
+                                logger.warning(
+                                    f"Skipping {url}: AI processing produced insufficient content "
+                                    f"({total_content} chars < {MIN_CONTENT_LENGTH_AI}, likely bot page/error/junk)"
+                                )
+                                continue
+
+                            logger.info(f"Successfully processed followed URL {url}: {len(url_sections)} sections")
+
+                            # Add followed URL as a document
+                            documents.append({
+                                "uri": url,
+                                "source_type": "webpage",
+                                "cached_files": {"raw_text": url_txt_path},
+                                "followed_from": file_uri,
+                                "sections": url_sections,
+                                "errors": [],
+                            })
+
+                        except Exception as e:
+                            logger.warning(f"AI processing failed for {url}: {e}, skipping")
+                            continue
+
+                    except Exception as e:
+                        logger.warning(f"Failed to process {url}: {e}, skipping")
+                        continue
+
+                    # Rate limiting: sleep between URL requests (except after last one)
+                    if idx < len(extracted_urls) - 1:
+                        logger.debug(f"Rate limiting: sleeping {URL_FOLLOW_DELAY_SECONDS}s before next URL")
+                        time.sleep(URL_FOLLOW_DELAY_SECONDS)
 
         except Exception as e:
             logger.error(f"Unexpected error processing {file.filename}: {e}")
