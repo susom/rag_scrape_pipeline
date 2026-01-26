@@ -68,6 +68,10 @@ def write_canonical_json(
 
     Returns:
         Dict with keys: run_id, output_path, stats, warnings
+
+    Schema additions:
+        - section_version: Content version identifier (currently "v_1")
+        - section_updated: ISO timestamp of when section was processed
     """
     if end_time is None:
         end_time = datetime.now(timezone.utc)
@@ -92,6 +96,8 @@ def write_canonical_json(
             sections.append({
                 "section_id": _generate_section_id(doc_id, idx),
                 "section_hash": f"sha256:{_sha256(text)}",
+                "section_version": "v_1",  # Placeholder for future versioning system
+                "section_updated": datetime.now(timezone.utc).isoformat(),
                 "text": text,
                 "location": {
                     "window_index": sec.get("window_index"),
