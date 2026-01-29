@@ -3,17 +3,17 @@ name: CI Build and Deploy
 on:
   push:
     branches:
-      - main
+      - development
 
 jobs:
   build-deploy:
     runs-on: ubuntu-latest
-    environment: production
+    environment: production # leverage this GHA environment as temporary to deploy to dev GCP project due to VPC limitations
     env:
       CLOUDSDK_CORE_DISABLE_PROMPTS: 1  # Disable prompting
-      REPO: ${{ vars.REPO }}
+      REPO: ${{ vars.REPO_DEV }}
       ARTIFACT_REGISTRY_KEY : ${{ secrets.ARTIFACT_REGISTRY_KEY }}
-      SA: ${{ vars.CLOUD_RUN_SERVICE_ACC_NAME }}
+      SA: ${{ vars.CLOUD_RUN_SERVICE_ACC_NAME_DEV }}
     services:
       docker:
         image: docker:stable
@@ -96,5 +96,5 @@ jobs:
             --set-secrets=REDCAP_API_URL=REDCAP_API_URL:latest \
             --set-secrets=REDCAP_API_TOKEN=REDCAP_API_TOKEN:latest \
             --set-secrets=STORAGE_MODE=STORAGE_MODE:latest \
-            --set-secrets=GCS_BUCKET=GCS_BUCKET:latest 
+            --set-secrets=GCS_BUCKET=GCS_BUCKET:latest
           set +x
