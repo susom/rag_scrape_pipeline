@@ -23,6 +23,7 @@ steps:
       - us-west1
       - --platform
       - managed
+      - --verbosity=debug
 
 timeout: '1200s'
 options:
