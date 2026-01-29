@@ -16,14 +16,13 @@ steps:
     args:
       - run
       - deploy
-      - rag-scrape-pipeline
+      - rexi-rpp
       - --image
       - us-west1-docker.pkg.dev/$PROJECT_ID/rag-scrape-pipeline/rag_scrape_pipeline:$COMMIT_SHA
       - --region
       - us-west1
       - --platform
       - managed
-      - --allow-unauthenticated
 
 timeout: '1200s'
 options:
