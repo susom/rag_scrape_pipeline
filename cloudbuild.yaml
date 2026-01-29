@@ -10,7 +10,7 @@ steps:
     args:
       - push
       - us-west1-docker.pkg.dev/$PROJECT_ID/rag-scrape-pipeline/rag_scrape_pipeline:$COMMIT_SHA
-
+# deploy to cloud run
   - name: gcr.io/google.com/cloudsdktool/cloud-sdk
     entrypoint: gcloud
     args:
