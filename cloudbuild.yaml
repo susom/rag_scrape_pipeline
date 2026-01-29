@@ -1,22 +1,30 @@
 steps:
-  - name: 'gcr.io/cloud-builders/docker'
-    args: ['build', '-t', 'us-west1-docker.pkg.dev/$PROJECT_ID/cloud-run-source-deploy/rag_scrape_pipeline/rexi-rpp:$COMMIT_SHA', '.']
+  - name: gcr.io/cloud-builders/docker
+    args:
+      - build
+      - -t
+      - us-west1-docker.pkg.dev/$PROJECT_ID/rag-scrape-pipeline/rag_scrape_pipeline:$COMMIT_SHA
+      - .
 
-  - name: 'gcr.io/cloud-builders/docker'
-    args: ['push', 'us-west1-docker.pkg.dev/$PROJECT_ID/cloud-run-source-deploy/rag_scrape_pipeline/rexi-rpp:$COMMIT_SHA']
+  - name: gcr.io/cloud-builders/docker
+    args:
+      - push
+      - us-west1-docker.pkg.dev/$PROJECT_ID/rag-scrape-pipeline/rag_scrape_pipeline:$COMMIT_SHA
 
-  - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
+  - name: gcr.io/google.com/cloudsdktool/cloud-sdk
     entrypoint: gcloud
     args:
-      [
-        'run','deploy','rag-scrape-pipeline',
-        '--image','us-west1-docker.pkg.dev/$PROJECT_ID/cloud-run-source-deploy/rag_scrape_pipeline/rexi-rpp:$COMMIT_SHA',
-        '--region','us-west1',
-        '--platform','managed',
-        '--allow-unauthenticated'
-      ]
+      - run
+      - deploy
+      - rag-scrape-pipeline
+      - --image
+      - us-west1-docker.pkg.dev/$PROJECT_ID/rag-scrape-pipeline/rag_scrape_pipeline:$COMMIT_SHA
+      - --region
+      - us-west1
+      - --platform
+      - managed
+      - --allow-unauthenticated
 
 timeout: '1200s'
 options:
   logging: CLOUD_LOGGING_ONLY
-
