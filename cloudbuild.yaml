@@ -16,7 +16,7 @@ steps:
     args:
       - run
       - deploy
-      - rexi-rpp
+      - production-pipeline
       - --image
       - us-west1-docker.pkg.dev/$PROJECT_ID/rag-scrape-pipeline/rag_scrape_pipeline:$COMMIT_SHA
       - --region
@@ -24,6 +24,25 @@ steps:
       - --platform
       - managed
       - --verbosity=debug
+      - --ingress
+      - internal-and-cloud-load-balancing
+      - --min-instances
+      - 1
+      - --max-instances
+      - 3
+      - --allow-unauthenticated
+      - --cpu
+      - 2
+      - --memory
+      - 4Gi
+      - --port
+      - 8080
+      - --set-secrets
+      - REDCAP_API_URL=REDCAP_API_URL:latest
+      - --set-secrets
+      - REDCAP_API_TOKEN=REDCAP_API_TOKEN:latest
+      - --set-secrets
+      - GCS_BUCKET=GCS_BUCKET:latest
 
 timeout: '1200s'
 options:
