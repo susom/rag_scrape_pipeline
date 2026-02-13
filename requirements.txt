@@ -14,3 +14,5 @@ uvicorn
 google-cloud-storage>=2.17.0
 python-multipart
 docx2txt
+psycopg2-binary
+sqlalchemy

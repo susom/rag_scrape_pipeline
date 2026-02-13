@@ -77,3 +77,5 @@ curl.txt
 /logs
 CAPPY.md
 .cappyignore
+
+secrets/*

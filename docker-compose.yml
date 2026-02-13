@@ -1,15 +1,35 @@
 services:
+  cloudsql-proxy:
+    container_name: cloudsql-proxy
+    image: gcr.io/cloud-sql-connectors/cloud-sql-proxy:2.7
+    command: >
+      -c "/secrets/cloudsql/credentials.json"
+      --unix-socket "/socket"
+      --max-connections 100
+      --max-sigterm-delay 30s
+      "som-rit-phi-redcap-prod:us-west1:redcap-rag"
+    volumes:
+      - ./secrets/cloud-sql-proxy-service-account.json:/secrets/cloudsql/credentials.json
+      - ./secrets/socket:/socket
+    restart: always
   scraper:
     build: .
     container_name: rag_pipeline
+    depends_on:
+      - cloudsql-proxy
     ports:
       - "9090:8080"
     volumes:
       - ./:/app          # full source mapped for reload
       - ./cache:/app/cache
       - ./config:/app/config
+      - ./socket:/socket
     env_file:
       - .env
     stdin_open: true
     tty: true
     command: uvicorn rag_pipeline.web:app --host 0.0.0.0 --port 8080 --reload --timeout-keep-alive 7200
+
+# This is an internal image to store the db socket
+volumes:
+  socket:
