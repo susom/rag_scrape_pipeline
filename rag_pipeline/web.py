@@ -3,7 +3,8 @@ RPP Web API - RAG Preparation Pipeline
 Primary interface for the RAG preparation tool.
 """
 
-from fastapi import FastAPI, HTTPException, Body, UploadFile, File, Form
+from contextlib import asynccontextmanager
+from fastapi import FastAPI, HTTPException, Body, UploadFile, File, Form, Depends
 from fastapi.responses import HTMLResponse, FileResponse
 from typing import List
 import json
@@ -25,10 +26,34 @@ from rag_pipeline.utils.logger import setup_logger
 from rag_pipeline.processing.sliding_window import SlidingWindowParser
 from rag_pipeline.processing.ai_client import AVAILABLE_MODELS, DEFAULT_MODEL
 from rag_pipeline.scraping.scraper import scrape_url
+from rag_pipeline.database import init_db, check_connection, get_db
+from sqlalchemy.orm import Session
 from datetime import datetime, timezone
 
-app = FastAPI(title="RPP - RAG Preparation Pipeline")
 logger = setup_logger()
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """Application lifespan handler for startup/shutdown events."""
+    # Startup
+    logger.info("Starting RAG Preparation Pipeline...")
+
+    # Initialize database
+    db_status = check_connection()
+    if db_status["connected"]:
+        logger.info(f"Database connected: {db_status['database']} (user: {db_status['user']})")
+        init_db()  # Create tables if they don't exist
+    else:
+        logger.warning(f"Database not connected: {db_status['error']}")
+
+    yield
+
+    # Shutdown
+    logger.info("Shutting down RAG Preparation Pipeline...")
+
+
+app = FastAPI(title="RPP - RAG Preparation Pipeline", lifespan=lifespan)
 
 # Link following configuration
 MAX_FOLLOWED_URLS_PER_DOC = 20  # Maximum URLs to follow per uploaded document
@@ -735,4 +760,20 @@ def download_output(run_id: str):
 
 @app.get("/health")
 def health_check():
-    return {"health": "ok", "version": RPP_VERSION}
+    db_status = check_connection()
+    return {
+        "health": "ok",
+        "version": RPP_VERSION,
+        "database": {
+            "connected": db_status["connected"],
+            "database": db_status.get("database"),
+            "error": db_status.get("error")
+        }
+    }
+
+
+@app.get("/db/status")
+def database_status():
+    """Get detailed database connection status."""
+    db_status = check_connection()
+    return db_status
