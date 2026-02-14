@@ -70,19 +70,19 @@ jobs:
 
       - name: Build Docker image
         run: |
-          docker buildx build --platform linux/amd64 . -t $REPO/production-image:build-${{ github.run_number }}
-          docker tag $REPO/production-image:build-${{ github.run_number }} $REPO/production-image:latest
+          docker buildx build --platform linux/amd64 . -t $REPO/development-image:build-${{ github.run_number }}
+          docker tag $REPO/development-image:build-${{ github.run_number }} $REPO/development-image:latest
 
       - name: Push Docker image to registry
         run: |
-          docker push $REPO/production-image:build-${{ github.run_number }}
-          docker push $REPO/production-image:latest
+          docker push $REPO/development-image:build-${{ github.run_number }}
+          docker push $REPO/development-image:latest
 
       - name: Deploy to Cloud Run
         run: |
           set -ex
-          gcloud run deploy production-pipeline \
-            --image="$REPO/production-image:latest" \
+          gcloud run deploy development-pipeline \
+            --image="$REPO/development-image:latest" \
             --platform=managed \
             --ingress=internal-and-cloud-load-balancing \
             --region="us-west1" \
