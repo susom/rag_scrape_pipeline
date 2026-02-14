@@ -4,8 +4,9 @@ Primary interface for the RAG preparation tool.
 """
 
 from contextlib import asynccontextmanager
-from fastapi import FastAPI, HTTPException, Body, UploadFile, File, Form, Depends
+from fastapi import FastAPI, HTTPException, Body, UploadFile, File, Form, Depends, Query
 from fastapi.responses import HTMLResponse, FileResponse
+from fastapi.openapi.utils import get_openapi
 from typing import List
 import json
 import os
@@ -33,6 +34,47 @@ from datetime import datetime, timezone
 logger = setup_logger()
 
 
+# OpenAPI Tags for documentation
+tags_metadata = [
+    {
+        "name": "Health",
+        "description": "Health check and status endpoints",
+    },
+    {
+        "name": "Database",
+        "description": "Database connection and status endpoints",
+    },
+    {
+        "name": "SharePoint - Sites",
+        "description": "SharePoint site configuration and status",
+    },
+    {
+        "name": "SharePoint - Pages",
+        "description": "Operations on SharePoint site pages",
+    },
+    {
+        "name": "SharePoint - Lists",
+        "description": "Operations on SharePoint lists and list items",
+    },
+    {
+        "name": "SharePoint - List Drive",
+        "description": "Operations on document libraries associated with lists",
+    },
+    {
+        "name": "SharePoint - Drive",
+        "description": "Operations on the default site document library (drive)",
+    },
+    {
+        "name": "SharePoint - Search",
+        "description": "Search operations across SharePoint content",
+    },
+    {
+        "name": "Pipeline",
+        "description": "RAG document processing pipeline operations",
+    },
+]
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Application lifespan handler for startup/shutdown events."""
@@ -53,7 +95,37 @@ async def lifespan(app: FastAPI):
     logger.info("Shutting down RAG Preparation Pipeline...")
 
 
-app = FastAPI(title="RPP - RAG Preparation Pipeline", lifespan=lifespan)
+app = FastAPI(
+    title="RPP - RAG Preparation Pipeline",
+    description="""
+## RAG Preparation Pipeline API
+
+This API provides endpoints for:
+- **SharePoint Integration**: Access SharePoint sites, pages, lists, and document libraries via Microsoft Graph API
+- **Document Processing**: Process and prepare documents for RAG (Retrieval-Augmented Generation)
+- **Database Management**: Track document ingestion state
+
+### SharePoint Configuration
+SharePoint sites are configured via environment variables:
+- `SHAREPOINT_SITE_HOSTNAME`: SharePoint hostname (e.g., `contoso.sharepoint.com`)
+- `SHAREPOINT_SITE_PATH`: Site path (e.g., `/sites/MySite`)
+
+Multiple sites can be configured using the naming pattern:
+- `SHAREPOINT_SITE_{NAME}_HOSTNAME`
+- `SHAREPOINT_SITE_{NAME}_PATH`
+
+### Authentication
+SharePoint credentials are stored in Google Cloud Secret Manager:
+- `SHAREPOINT_CLIENT_ID`
+- `SHAREPOINT_CLIENT_SECRET`
+- `SHAREPOINT_TENANT_ID`
+    """,
+    version=RPP_VERSION,
+    openapi_tags=tags_metadata,
+    lifespan=lifespan,
+    docs_url="/docs",
+    redoc_url="/redoc",
+)
 
 # Link following configuration
 MAX_FOLLOWED_URLS_PER_DOC = 20  # Maximum URLs to follow per uploaded document
@@ -743,9 +815,13 @@ def upload_file(
     }
 
 
-@app.get("/download/{run_id}")
+@app.get("/download/{run_id}", tags=["Pipeline"])
 def download_output(run_id: str):
-    """Download the canonical JSON output for a run."""
+    """
+    Download the canonical JSON output for a run.
+
+    Returns the processed RAG-ready JSON file for a given run ID.
+    """
     file_path = os.path.join("cache", "rag_ready", f"{run_id}.json")
 
     if not os.path.exists(file_path):
@@ -758,8 +834,13 @@ def download_output(run_id: str):
     )
 
 
-@app.get("/health")
+@app.get("/health", tags=["Health"])
 def health_check():
+    """
+    Health check endpoint.
+
+    Returns the current health status of the API, including database connection status.
+    """
     db_status = check_connection()
     return {
         "health": "ok",
@@ -772,9 +853,17 @@ def health_check():
     }
 
 
-@app.get("/db/status")
+@app.get("/db/status", tags=["Database"])
 def database_status():
-    """Get detailed database connection status."""
+    """
+    Get detailed database connection status.
+
+    Returns connection information including:
+    - Database name
+    - User
+    - MySQL version
+    - List of tables
+    """
     db_status = check_connection()
     return db_status
 
@@ -824,9 +913,16 @@ def get_sharepoint_client(site: Optional[str] = None) -> SharePointGraphClient:
         raise HTTPException(status_code=500, detail=f"Failed to initialize SharePoint client: {e}")
 
 
-@app.get("/sharepoint/sites")
+@app.get("/sharepoint/sites", tags=["SharePoint - Sites"])
 def list_configured_sites():
-    """List all configured SharePoint sites."""
+    """
+    List all configured SharePoint sites.
+
+    Returns all sites configured via environment variables.
+    Sites can be configured using:
+    - Default: `SHAREPOINT_SITE_HOSTNAME`, `SHAREPOINT_SITE_PATH`
+    - Named: `SHAREPOINT_SITE_{NAME}_HOSTNAME`, `SHAREPOINT_SITE_{NAME}_PATH`
+    """
     manager = get_site_config_manager()
     sites = manager.list_sites()
     return {
@@ -843,13 +939,14 @@ def list_configured_sites():
     }
 
 
-@app.get("/sharepoint/status")
-def sharepoint_status(site: Optional[str] = None):
+@app.get("/sharepoint/status", tags=["SharePoint - Sites"])
+def sharepoint_status(
+    site: Optional[str] = Query(None, description="Site name (uses 'default' if not specified)")
+):
     """
     Check SharePoint connection status.
 
-    Args:
-        site: Site name (optional, uses default if not specified)
+    Tests the connection to a SharePoint site and returns site information.
     """
     try:
         client = get_sharepoint_client(site)
@@ -876,17 +973,15 @@ def sharepoint_status(site: Optional[str] = None):
         }
 
 
-@app.get("/sharepoint/pages")
+@app.get("/sharepoint/pages", tags=["SharePoint - Pages"])
 def list_sharepoint_pages(
-    site: Optional[str] = None,
-    max_items: int = 100,
+    site: Optional[str] = Query(None, description="Site name (uses 'default' if not specified)"),
+    max_items: int = Query(100, description="Maximum number of pages to return"),
 ):
     """
     List all site pages from SharePoint.
 
-    Args:
-        site: Site name (optional, uses default if not specified)
-        max_items: Maximum number of pages to return (default: 100)
+    Returns a list of all pages in the specified SharePoint site.
     """
     try:
         client = get_sharepoint_client(site)
@@ -902,14 +997,15 @@ def list_sharepoint_pages(
         raise HTTPException(status_code=500, detail=f"Failed to fetch pages: {e}")
 
 
-@app.get("/sharepoint/pages/{page_id}")
-def get_sharepoint_page(page_id: str, site: Optional[str] = None):
+@app.get("/sharepoint/pages/{page_id}", tags=["SharePoint - Pages"])
+def get_sharepoint_page(
+    page_id: str,
+    site: Optional[str] = Query(None, description="Site name (uses 'default' if not specified)"),
+):
     """
     Get a specific SharePoint page by ID.
 
-    Args:
-        page_id: The page ID
-        site: Site name (optional, uses default if not specified)
+    Returns the page metadata and properties.
     """
     try:
         client = get_sharepoint_client(site)
@@ -921,14 +1017,15 @@ def get_sharepoint_page(page_id: str, site: Optional[str] = None):
         raise HTTPException(status_code=500, detail=f"Failed to fetch page: {e}")
 
 
-@app.get("/sharepoint/pages/{page_id}/content")
-def get_sharepoint_page_content(page_id: str, site: Optional[str] = None):
+@app.get("/sharepoint/pages/{page_id}/content", tags=["SharePoint - Pages"])
+def get_sharepoint_page_content(
+    page_id: str,
+    site: Optional[str] = Query(None, description="Site name (uses 'default' if not specified)"),
+):
     """
     Get the content (web parts) of a SharePoint page.
 
-    Args:
-        page_id: The page ID
-        site: Site name (optional, uses default if not specified)
+    Returns the page with its canvas layout and web parts.
     """
     try:
         client = get_sharepoint_client(site)
@@ -944,17 +1041,15 @@ def get_sharepoint_page_content(page_id: str, site: Optional[str] = None):
         raise HTTPException(status_code=500, detail=f"Failed to fetch page content: {e}")
 
 
-@app.get("/sharepoint/lists")
+@app.get("/sharepoint/lists", tags=["SharePoint - Lists"])
 def list_sharepoint_lists(
-    site: Optional[str] = None,
-    max_items: int = 100,
+    site: Optional[str] = Query(None, description="Site name (uses 'default' if not specified)"),
+    max_items: int = Query(100, description="Maximum number of lists to return"),
 ):
     """
     List all lists from the SharePoint site.
 
-    Args:
-        site: Site name (optional, uses default if not specified)
-        max_items: Maximum number of lists to return (default: 100)
+    Returns all SharePoint lists including document libraries.
     """
     try:
         client = get_sharepoint_client(site)
@@ -970,14 +1065,15 @@ def list_sharepoint_lists(
         raise HTTPException(status_code=500, detail=f"Failed to fetch lists: {e}")
 
 
-@app.get("/sharepoint/lists/{list_id}")
-def get_sharepoint_list(list_id: str, site: Optional[str] = None):
+@app.get("/sharepoint/lists/{list_id}", tags=["SharePoint - Lists"])
+def get_sharepoint_list(
+    list_id: str,
+    site: Optional[str] = Query(None, description="Site name (uses 'default' if not specified)"),
+):
     """
     Get a specific SharePoint list by ID.
 
-    Args:
-        list_id: The list ID
-        site: Site name (optional, uses default if not specified)
+    Returns list metadata and properties.
     """
     try:
         client = get_sharepoint_client(site)
@@ -989,21 +1085,17 @@ def get_sharepoint_list(list_id: str, site: Optional[str] = None):
         raise HTTPException(status_code=500, detail=f"Failed to fetch list: {e}")
 
 
-@app.get("/sharepoint/lists/{list_id}/items")
+@app.get("/sharepoint/lists/{list_id}/items", tags=["SharePoint - Lists"])
 def get_sharepoint_list_items(
     list_id: str,
-    site: Optional[str] = None,
-    max_items: int = 100,
-    filter_query: Optional[str] = None,
+    site: Optional[str] = Query(None, description="Site name (uses 'default' if not specified)"),
+    max_items: int = Query(100, description="Maximum number of items to return"),
+    filter_query: Optional[str] = Query(None, description="OData filter query (e.g., 'fields/Status eq \\'Active\\'')"),
 ):
     """
     Get items from a SharePoint list.
 
-    Args:
-        list_id: The list ID
-        site: Site name (optional, uses default if not specified)
-        max_items: Maximum number of items to return (default: 100)
-        filter_query: OData filter query (optional)
+    Returns list items with their field values expanded.
     """
     try:
         client = get_sharepoint_client(site)
@@ -1023,14 +1115,15 @@ def get_sharepoint_list_items(
         raise HTTPException(status_code=500, detail=f"Failed to fetch list items: {e}")
 
 
-@app.get("/sharepoint/lists/{list_id}/drive")
-def get_sharepoint_list_drive(list_id: str, site: Optional[str] = None):
+@app.get("/sharepoint/lists/{list_id}/drive", tags=["SharePoint - List Drive"])
+def get_sharepoint_list_drive(
+    list_id: str,
+    site: Optional[str] = Query(None, description="Site name (uses 'default' if not specified)"),
+):
     """
     Get the drive associated with a list (for document libraries).
 
-    Args:
-        list_id: The list ID
-        site: Site name (optional, uses default if not specified)
+    Returns drive metadata for a SharePoint list that is a document library.
     """
     try:
         client = get_sharepoint_client(site)
@@ -1042,14 +1135,15 @@ def get_sharepoint_list_drive(list_id: str, site: Optional[str] = None):
         raise HTTPException(status_code=500, detail=f"Failed to fetch list drive: {e}")
 
 
-@app.get("/sharepoint/lists/{list_id}/drive/root")
-def get_sharepoint_list_drive_root(list_id: str, site: Optional[str] = None):
+@app.get("/sharepoint/lists/{list_id}/drive/root", tags=["SharePoint - List Drive"])
+def get_sharepoint_list_drive_root(
+    list_id: str,
+    site: Optional[str] = Query(None, description="Site name (uses 'default' if not specified)"),
+):
     """
     Get the root folder of a list's drive (document library).
 
-    Args:
-        list_id: The list ID
-        site: Site name (optional, uses default if not specified)
+    Returns the root folder metadata for a document library.
     """
     try:
         client = get_sharepoint_client(site)
@@ -1061,25 +1155,20 @@ def get_sharepoint_list_drive_root(list_id: str, site: Optional[str] = None):
         raise HTTPException(status_code=500, detail=f"Failed to fetch list drive root: {e}")
 
 
-@app.get("/sharepoint/lists/{list_id}/drive/children")
+@app.get("/sharepoint/lists/{list_id}/drive/children", tags=["SharePoint - List Drive"])
 def get_sharepoint_list_drive_children(
     list_id: str,
-    site: Optional[str] = None,
-    folder_path: str = "",
-    max_items: int = 100,
-    recursive: bool = False,
+    site: Optional[str] = Query(None, description="Site name (uses 'default' if not specified)"),
+    folder_path: str = Query("", description="Path to subfolder (empty for root)"),
+    max_items: int = Query(100, description="Maximum number of items to return"),
+    recursive: bool = Query(False, description="Whether to recursively get items from subfolders"),
 ):
     """
     Get children (files and folders) from a list's drive root.
 
-    Equivalent to: /sites/{SiteID}/lists/{ListID}/drive/root/children
+    Equivalent to Graph API: `/sites/{SiteID}/lists/{ListID}/drive/root/children`
 
-    Args:
-        list_id: The list ID
-        site: Site name (optional, uses default if not specified)
-        folder_path: Path to subfolder (empty for root)
-        max_items: Maximum number of items to return (default: 100)
-        recursive: Whether to recursively get items from subfolders
+    Returns files and folders from a document library list.
     """
     try:
         client = get_sharepoint_client(site)
@@ -1102,13 +1191,14 @@ def get_sharepoint_list_drive_children(
         raise HTTPException(status_code=500, detail=f"Failed to fetch list drive children: {e}")
 
 
-@app.get("/sharepoint/drive")
-def get_sharepoint_drive_root(site: Optional[str] = None):
+@app.get("/sharepoint/drive", tags=["SharePoint - Drive"])
+def get_sharepoint_drive_root(
+    site: Optional[str] = Query(None, description="Site name (uses 'default' if not specified)"),
+):
     """
     Get the drive root (default document library) information.
 
-    Args:
-        site: Site name (optional, uses default if not specified)
+    Returns metadata for the default document library root folder.
     """
     try:
         client = get_sharepoint_client(site)
@@ -1120,13 +1210,14 @@ def get_sharepoint_drive_root(site: Optional[str] = None):
         raise HTTPException(status_code=500, detail=f"Failed to fetch drive root: {e}")
 
 
-@app.get("/sharepoint/drives")
-def list_sharepoint_drives(site: Optional[str] = None):
+@app.get("/sharepoint/drives", tags=["SharePoint - Drive"])
+def list_sharepoint_drives(
+    site: Optional[str] = Query(None, description="Site name (uses 'default' if not specified)"),
+):
     """
     List all drives (document libraries) in the SharePoint site.
 
-    Args:
-        site: Site name (optional, uses default if not specified)
+    Returns all document libraries available in the site.
     """
     try:
         client = get_sharepoint_client(site)
@@ -1142,23 +1233,18 @@ def list_sharepoint_drives(site: Optional[str] = None):
         raise HTTPException(status_code=500, detail=f"Failed to fetch drives: {e}")
 
 
-@app.get("/sharepoint/drive/items")
+@app.get("/sharepoint/drive/items", tags=["SharePoint - Drive"])
 def get_sharepoint_drive_items(
-    site: Optional[str] = None,
-    folder_path: str = "",
-    max_items: int = 100,
-    recursive: bool = False,
-    drive_id: Optional[str] = None,
+    site: Optional[str] = Query(None, description="Site name (uses 'default' if not specified)"),
+    folder_path: str = Query("", description="Path to folder (empty for root)"),
+    max_items: int = Query(100, description="Maximum number of items to return"),
+    recursive: bool = Query(False, description="Whether to recursively get items from subfolders"),
+    drive_id: Optional[str] = Query(None, description="Specific drive ID (uses default drive if not specified)"),
 ):
     """
     Get items from the document library.
 
-    Args:
-        site: Site name (optional, uses default if not specified)
-        folder_path: Path to folder (empty for root)
-        max_items: Maximum number of items to return (default: 100)
-        recursive: Whether to recursively get items from subfolders
-        drive_id: Specific drive ID (optional, uses default drive)
+    Returns files and folders from the default or specified document library.
     """
     try:
         client = get_sharepoint_client(site)
@@ -1179,21 +1265,22 @@ def get_sharepoint_drive_items(
         raise HTTPException(status_code=500, detail=f"Failed to fetch drive items: {e}")
 
 
-@app.get("/sharepoint/search")
+@app.get("/sharepoint/search", tags=["SharePoint - Search"])
 def search_sharepoint(
-    query: str,
-    site: Optional[str] = None,
-    max_items: int = 100,
-    entity_types: str = "driveItem,listItem",
+    query: str = Query(..., description="Search query string"),
+    site: Optional[str] = Query(None, description="Site name (uses 'default' if not specified)"),
+    max_items: int = Query(100, description="Maximum number of results"),
+    entity_types: str = Query("driveItem,listItem", description="Comma-separated entity types to search"),
 ):
     """
     Search for content in SharePoint.
 
-    Args:
-        query: Search query string
-        site: Site name (optional, uses default if not specified)
-        max_items: Maximum number of results (default: 100)
-        entity_types: Comma-separated entity types to search (default: driveItem,listItem)
+    Searches across files, list items, and other content in the SharePoint site.
+
+    **Entity Types:**
+    - `driveItem`: Files and folders
+    - `listItem`: List items
+    - `site`: Sites
     """
     try:
         client = get_sharepoint_client(site)
