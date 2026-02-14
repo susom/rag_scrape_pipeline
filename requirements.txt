@@ -3,6 +3,7 @@
 beautifulsoup4
 requests
 google-cloud-storage
+google-cloud-secret-manager
 pdfplumber
 PyPDF2
 lxml
