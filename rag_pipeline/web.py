@@ -4,13 +4,14 @@ Primary interface for the RAG preparation tool.
 """
 
 from contextlib import asynccontextmanager
-from fastapi import FastAPI, HTTPException, Body, UploadFile, File, Form, Depends, Query
+from fastapi import FastAPI, HTTPException, Body, UploadFile, File, Form, Depends, Query, Request
 from fastapi.responses import HTMLResponse, FileResponse
 from fastapi.openapi.utils import get_openapi
 from typing import List
 import json
 import os
 import re
+import secrets
 import time
 import hashlib
 
@@ -18,14 +19,21 @@ from rag_pipeline.main import run_pipeline
 from rag_pipeline.processing.text_extraction import extract_text_from_file, get_thinker_name
 from rag_pipeline.output_json import generate_run_id, write_canonical_json, RPP_VERSION
 from rag_pipeline.utils.logger import setup_logger
+from rag_pipeline.utils.urls import extract_urls_from_text
 from rag_pipeline.processing.sliding_window import SlidingWindowParser
 from rag_pipeline.processing.ai_client import AVAILABLE_MODELS, DEFAULT_MODEL
 from rag_pipeline.scraping.scraper import scrape_url
 from rag_pipeline.database import init_db, check_connection, get_db
 from sqlalchemy.orm import Session
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 logger = setup_logger()
+
+# Optional shared secret for /api/ingest-batch.
+# Set INGESTION_API_KEY in the environment; configure Cloud Scheduler to send
+# the same value in the X-Ingestion-Key header. If the env var is not set the
+# endpoint remains open (fine for local dev behind a firewall).
+INGESTION_API_KEY = os.getenv("INGESTION_API_KEY", "")
 
 
 # OpenAPI Tags for documentation
@@ -143,47 +151,6 @@ BOT_DETECTION_KEYWORDS = [
     "please enable cookies",
 ]
 
-# Default prompts
-DEFAULT_SYSTEM_PROMPT = """You are a content extraction assistant. Your job is to extract the main, relevant content from the provided text while removing any navigation, boilerplate, or irrelevant elements. Output ONLY the extracted content - no explanations, no commentary, no JSON wrapping. Preserve important information like dates, names, numbers, and structured data (tables). If the content is already clean, return it as-is without modification."""
-
-DEFAULT_USER_TEMPLATE = """Extract the main content from this text. Remove any website navigation, headers, footers, or boilerplate. Keep all substantive information including tables, lists, dates, and names.
-
---- BEGIN TEXT ---
-{window_text}
---- END TEXT ---"""
-
-
-def load_prompts():
-    """Load prompts from config file or return defaults."""
-    config_path = "config/sliding_window_prompts.json"
-    system_prompt = DEFAULT_SYSTEM_PROMPT
-    user_template = DEFAULT_USER_TEMPLATE
-
-    if os.path.exists(config_path):
-        try:
-            with open(config_path, "r", encoding="utf-8") as f:
-                cfg = json.load(f)
-            loaded_system = cfg.get("system", "").strip()
-            loaded_user = cfg.get("user_template", "").strip()
-
-            # Only use if not corrupted
-            if loaded_system and "Ã" not in loaded_system:
-                system_prompt = loaded_system
-            if loaded_user and "Ã" not in loaded_user:
-                user_template = loaded_user
-        except Exception:
-            pass
-
-    return system_prompt, user_template
-
-
-def save_prompts(system: str, user_template: str):
-    """Save prompts to config file."""
-    os.makedirs("config", exist_ok=True)
-    with open("config/sliding_window_prompts.json", "w", encoding="utf-8") as f:
-        json.dump({"system": system, "user_template": user_template}, f, ensure_ascii=False, indent=2)
-
-
 def is_bot_detection_page(text: str) -> bool:
     """
     Check if the scraped text appears to be a bot detection/CAPTCHA page.
@@ -209,40 +176,9 @@ def is_bot_detection_page(text: str) -> bool:
     return False
 
 
-def extract_urls_from_text(text: str) -> list[str]:
-    """
-    Extract unique http/https URLs from text.
-
-    Returns:
-        List of unique URLs found in the text.
-    """
-    # Regex pattern for http/https URLs
-    # Matches URLs with proper structure, avoiding common false positives
-    url_pattern = r'https?://[^\s<>"{}|\\^`\[\]]+'
-
-    urls = re.findall(url_pattern, text)
-
-    # Remove trailing punctuation that's likely not part of the URL
-    cleaned_urls = []
-    for url in urls:
-        url = url.rstrip('.,;:!?)')
-        cleaned_urls.append(url)
-
-    # Deduplicate while preserving order
-    seen = set()
-    unique_urls = []
-    for url in cleaned_urls:
-        if url not in seen:
-            seen.add(url)
-            unique_urls.append(url)
-
-    return unique_urls
-
 
 @app.get("/", response_class=HTMLResponse)
 def home():
-    system_prompt, user_template = load_prompts()
-
     # Generate model options for dropdown
     model_options = "\n".join([
         f'                <option value="{m}"{"selected" if m == DEFAULT_MODEL else ""}>{m}</option>'
@@ -282,18 +218,6 @@ def home():
     <div class="container">
         <h1>RPP</h1>
         <p class="subtitle">RAG Preparation Pipeline v{RPP_VERSION}</p>
-
-        <details>
-            <summary>Customize AI Extraction Prompts (Advanced)</summary>
-            <div class="card" style="margin-top: 10px;">
-                <label>System Prompt:</label>
-                <textarea id="system" rows="4">{system_prompt}</textarea>
-
-                <label style="margin-top: 15px;">User Prompt Template:</label>
-                <textarea id="user_template" rows="6">{user_template}</textarea>
-                <p style="font-size: 12px; color: #666;">Use {{window_text}} as placeholder for the content chunk.</p>
-            </div>
-        </details>
 
         <div class="card">
             <h3>Process URLs</h3>
@@ -381,8 +305,6 @@ def home():
                     body: JSON.stringify({{
                         urls: urls,
                         model: document.getElementById('model').value,
-                        system: document.getElementById('system').value,
-                        user_template: document.getElementById('user_template').value,
                         follow_links: document.getElementById('follow_links').checked
                     }})
                 }});
@@ -449,8 +371,6 @@ def home():
             }}
 
             formData.append('model', document.getElementById('model').value);
-            formData.append('system', document.getElementById('system').value);
-            formData.append('user_template', document.getElementById('user_template').value);
             formData.append('follow_doc_links', document.getElementById('follow_doc_links').checked);
 
             try {{
@@ -514,10 +434,6 @@ def run_scrape(payload: dict = Body(...)):
     if model not in AVAILABLE_MODELS:
         model = DEFAULT_MODEL
 
-    # Save custom prompts if provided
-    if system or user_template:
-        save_prompts(system or DEFAULT_SYSTEM_PROMPT, user_template or DEFAULT_USER_TEMPLATE)
-
     run_id = generate_run_id(urls)
     logger.info(f"Starting pipeline run {run_id} for {len(urls)} URLs with model={model}")
 
@@ -564,10 +480,6 @@ def upload_file(
     if model not in AVAILABLE_MODELS:
         model = DEFAULT_MODEL
 
-    # Save custom prompts if provided
-    if system or user_template:
-        save_prompts(system or DEFAULT_SYSTEM_PROMPT, user_template or DEFAULT_USER_TEMPLATE)
-
     # Convert follow_doc_links to boolean
     follow_doc_links_bool = str(follow_doc_links).lower() == "true"
     logger.info(f"Link following for uploaded documents: {follow_doc_links_bool}")
@@ -585,7 +497,8 @@ def upload_file(
     for file in files:
         # Save uploaded file
         file_content = file.file.read()
-        file_path = os.path.join("cache/raw", file.filename)
+        safe_filename = os.path.basename(file.filename)  # prevent path traversal
+        file_path = os.path.join("cache/raw", safe_filename)
         with open(file_path, "wb") as f:
             f.write(file_content)
         logger.info(f"Uploaded file: {file_path}")
@@ -790,6 +703,8 @@ def download_output(run_id: str):
 
     Returns the processed RAG-ready JSON file for a given run ID.
     """
+    if not re.match(r'^[a-zA-Z0-9_-]+$', run_id):
+        raise HTTPException(status_code=400, detail="Invalid run_id format")
     file_path = os.path.join("cache", "rag_ready", f"{run_id}.json")
 
     if not os.path.exists(file_path):
@@ -1269,9 +1184,11 @@ def search_sharepoint(
 
 @app.post("/api/ingest-batch")
 async def ingest_batch(
+    request: Request,
     force_reprocess: bool = False,
     document_ids: str = None,
     dry_run: bool = False,
+    days_back: int = 7,
     db: Session = Depends(get_db),
 ):
     """
@@ -1313,10 +1230,22 @@ async def ingest_batch(
     from rag_pipeline.automation.orchestrator import run_automated_ingestion
     from fastapi.responses import JSONResponse
 
+    # Validate ingestion key if one is configured
+    if INGESTION_API_KEY:
+        provided = request.headers.get("X-Ingestion-Key", "")
+        if not secrets.compare_digest(provided, INGESTION_API_KEY):
+            raise HTTPException(status_code=401, detail="Unauthorized")
+
     # Parse document_ids if provided
     doc_id_list = None
     if document_ids:
         doc_id_list = [id.strip() for id in document_ids.split(",") if id.strip()]
+
+    # Compute SharePoint date filter (ignored when force_reprocess=True)
+    modified_since = None
+    if not force_reprocess:
+        modified_since = datetime.now(timezone.utc) - timedelta(days=days_back)
+        logger.info(f"SharePoint date filter: files modified since {modified_since.isoformat()} ({days_back} days)")
 
     try:
         # Acquire distributed lock to prevent concurrent runs
@@ -1331,6 +1260,7 @@ async def ingest_batch(
                 force_reprocess=force_reprocess,
                 document_ids=doc_id_list,
                 dry_run=dry_run,
+                modified_since=modified_since,
             )
 
             # Build response

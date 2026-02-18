@@ -109,13 +109,13 @@ class SlidingWindowParser:
         return [p.strip() for p in parts if p.strip()]
 
     def create_windows(self, text: str) -> List[Tuple[str, int, int]]:
-        print(f"🔍 Creating sliding windows...")
-        print(f"   Window size: {self.window_size:,} tokens")
-        print(f"   Overlap: {self.overlap:,} tokens")
         tokens = self.tokenizer.encode(text)
         total_tokens = len(tokens)
         self.stats.total_tokens = total_tokens
-        print(f"   Total tokens: {total_tokens:,}")
+        logger.info(
+            f"Creating sliding windows: {total_tokens:,} tokens, "
+            f"window={self.window_size:,}, overlap={self.overlap:,}"
+        )
 
         windows = []
         start = 0
@@ -127,7 +127,7 @@ class SlidingWindowParser:
             if end >= total_tokens:
                 break
             start = end - self.overlap
-        print(f"   Created {len(windows)} windows")
+        logger.info(f"Created {len(windows)} window(s)")
         return windows
 
     def _sanitize_ai_output(self, text: str, fallback_text: str) -> str:
@@ -184,8 +184,7 @@ class SlidingWindowParser:
         fallback_used = False
 
         try:
-            logger.info(f"Window {window_num}/{total_windows}: Calling AI model={self.model}")
-            print(f"   Processing window {window_num}/{total_windows} via AI (model={self.model})...")
+            logger.info(f"Window {window_num}/{total_windows}: calling AI model={self.model}")
 
             raw_response = chat_completion(
                 user_prompt,
@@ -203,17 +202,13 @@ class SlidingWindowParser:
 
             if clean_text == window_text.strip():
                 fallback_used = True
-                logger.warning(f"Window {window_num}: Used fallback (AI returned empty/invalid)")
+                logger.warning(f"Window {window_num}: used fallback (AI returned empty/invalid)")
 
-            logger.info(f"Window {window_num}: Extracted {len(clean_text)} chars, fallback={fallback_used}")
-            print(f"      → Extracted {len(clean_text)} chars")
+            logger.info(f"Window {window_num}: extracted {len(clean_text)} chars, fallback={fallback_used}")
             return [clean_text]
 
         except Exception as e:
-            fallback_used = True
-            logger.error(f"Window {window_num}: AI extraction failed: {e}, using fallback")
-            print(f"   ⚠️ AI extraction failed for window {window_num}: {e}")
-            print(f"      → Falling back to raw text")
+            logger.error(f"Window {window_num}: AI extraction failed: {e}, falling back to raw text")
             return [window_text.strip()]
 
     def _load_prompts(self, window_text: str, thinker_name: str = "default") -> tuple[str, str]:
@@ -295,16 +290,16 @@ class SlidingWindowParser:
 
     def calculate_cost_estimates(self):
         """Logs cost estimates assuming all cache miss tokens for standard and discount pricing."""
-
         input_million_tokens = self.stats.input_tokens / 1_000_000
         output_million_tokens = self.stats.output_tokens / 1_000_000
 
-        regular_cost = (input_million_tokens * 0.55) + (output_million_tokens * 2.19)  # 100% cache miss, standard rate
-        discount_cost = (input_million_tokens * 0.135) + (output_million_tokens * 0.55)  # 100% cache miss, discount rate
+        regular_cost = (input_million_tokens * 0.55) + (output_million_tokens * 2.19)
+        discount_cost = (input_million_tokens * 0.135) + (output_million_tokens * 0.55)
 
-        print(f"\n💰 Cost estimates assuming 100% cache misses:")
-        print(f"     Regular hours cost: ${regular_cost:.6f}")
-        print(f"     Discount hours cost: ${discount_cost:.6f}")
+        logger.info(
+            f"Cost estimates (100% cache miss): "
+            f"regular=${regular_cost:.6f}, discount=${discount_cost:.6f}"
+        )
 
     def deduplicate_extracts(self, extracts: List[str]) -> List[str]:
         seen = set()
@@ -354,33 +349,28 @@ class SlidingWindowParser:
     def process_file(self, input_file: str, output_file: str, thinker_name: str) -> tuple[int, list[dict]]:
         self.stats.start_time = time.time()
 
-        print(f"🚀 Sliding Window Processing")
-        print(f"📁 Input: {input_file}")
-        print(f"🎯 Output: {output_file}")
-        print(f"🧠 Thinker: {thinker_name}")
-        print(f"🤖 Model: {self.model}")
-        print("=" * 60)
+        logger.info(f"Sliding window processing: input={input_file}, thinker={thinker_name}, model={self.model}")
 
         with open(input_file, 'r', encoding='utf-8') as f:
             text = f.read()
 
-        # 🧩 Doc-specific overfit mode: split by explicit "Section Number"
+        # Doc-specific overfit mode: split by explicit "Section Number"
         if "All Content" in os.path.basename(input_file):
-            print("🧠 Detected 'All Content' document — switching to section-by-section extraction mode")
+            logger.info("Detected 'All Content' document — switching to section-by-section extraction mode")
             try:
                 sections = self.split_into_sections(text)
-                print(f"   Found {len(sections)} discrete sections")
+                logger.info(f"Found {len(sections)} discrete sections")
 
                 all_extracts = []
                 for idx, section_text in enumerate(sections, 1):
                     section_id = re.search(r'Section Number:\s*(\d+)', section_text)
                     section_id = section_id.group(1) if section_id else f"{idx:03d}"
-                    print(f"   → Extracting Section {section_id}")
+                    logger.info(f"Extracting section {section_id}")
 
                     extracts = self.extract_from_window(section_text, thinker_name, idx, len(sections))
                     if extracts:
                         all_extracts.extend(extracts)
-                print("✅ Section-based extraction complete.")
+                logger.info("Section-based extraction complete")
                 # Build sections data for canonical JSON output
                 sections_data = [
                     {
@@ -397,11 +387,11 @@ class SlidingWindowParser:
                 ]
                 return len(all_extracts), sections_data
             except Exception as e:
-                print(f"⚠️ Section split failed, reverting to normal sliding-window mode ({e})")
+                logger.warning(f"Section split failed, reverting to sliding-window mode: {e}")
 
         windows = self.create_windows(text)
 
-        print(f"\n🔄 Processing {len(windows)} windows...")
+        logger.info(f"Processing {len(windows)} window(s)...")
         all_extracts = []
 
         for i, (window_text, start_pos, end_pos) in enumerate(windows, 1):
@@ -413,12 +403,15 @@ class SlidingWindowParser:
                 elapsed = time.time() - self.stats.start_time
                 rate = i / elapsed * 60
                 eta = (len(windows) - i) / rate if rate > 0 else 0
-                print(f"   Progress: {i}/{len(windows)} windows ({i/len(windows)*100:.1f}%) | Rate: {rate:.1f} windows/min | ETA: {eta:.1f} min")
+                logger.info(
+                    f"Progress: {i}/{len(windows)} windows "
+                    f"({i/len(windows)*100:.1f}%) | "
+                    f"rate={rate:.1f}/min | ETA={eta:.1f}min"
+                )
 
-        print(f"\n🔍 Deduplicating extracts...")
-        print(f"   Before: {len(all_extracts)} extracts")
+        logger.info(f"Deduplicating: {len(all_extracts)} extracts before")
         unique_extracts = self.deduplicate_extracts(all_extracts)
-        print(f"   After: {len(unique_extracts)} unique extracts")
+        logger.info(f"Deduplication done: {len(unique_extracts)} unique extracts")
 
         total_time = time.time() - self.stats.start_time
         cost = self.calculate_cost()
@@ -426,15 +419,14 @@ class SlidingWindowParser:
 
         self.calculate_cost_estimates()
 
-        print("=" * 60)
-        print(f"✅ Processing Complete!")
-        print(f"⏱️  Total time: {total_time / 60:.1f} minutes")
-        print(f"🪟 Windows processed: {self.stats.windows_processed}")
-        print(f"📊 Input tokens: {self.stats.input_tokens:,}")
-        print(f"📤 Output tokens: {self.stats.output_tokens:,}")
-        print(f"💰 Estimated cost (discount pricing): ${cost:.3f}")
-        print(f"🧠 Thought structures extracted: {len(unique_extracts)}")
-        print(f"🎯 Ready for canonical JSON output!")
+        logger.info(
+            f"Processing complete: {total_time / 60:.1f}min, "
+            f"{self.stats.windows_processed} windows, "
+            f"{self.stats.input_tokens:,} input tokens, "
+            f"{self.stats.output_tokens:,} output tokens, "
+            f"est. cost=${cost:.3f}, "
+            f"{len(unique_extracts)} extracts"
+        )
 
         # Build sections data for canonical JSON output
         sections_data = [
@@ -481,13 +473,11 @@ Examples:
 
     try:
         count, sections = sliding_parser.process_file(args.input_file, args.output_file, args.thinker)
-        print(f"\n🎉 Success! Generated {count} extracts for your pipeline.")
-        print(f"   (Use rag_pipeline.main or web API for canonical JSON output)")
+        logger.info(f"Success: generated {count} extracts")
         return 0
     except Exception as e:
-        print(f"\n❌ Error: {e}")
+        logger.error(f"Error: {e}")
         return 1
 
 if __name__ == "__main__":
     exit(main())
-

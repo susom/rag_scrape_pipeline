@@ -101,14 +101,13 @@ def fetch_content_sources(modified_since: Optional[datetime] = None) -> Tuple[Li
             logger.info(f"Fetched {len(regular_items)} items from SharePoint manifest")
 
             # Separate external-urls.txt from regular documents
-            special_url_file = None
-            for item in regular_items:
-                if item.name.lower() == "external-urls.txt":
-                    special_url_file = item
-                    regular_items.remove(item)
-                    break
-
-            sharepoint_items = regular_items
+            special_url_file = next(
+                (item for item in regular_items if item.name.lower() == "external-urls.txt"),
+                None,
+            )
+            sharepoint_items = [
+                item for item in regular_items if item.name.lower() != "external-urls.txt"
+            ]
             logger.info(f"{len(sharepoint_items)} regular documents for processing")
 
         except Exception as e:

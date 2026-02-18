@@ -8,7 +8,7 @@ logger = setup_logger()
 def process_pdfs(pdf_url: str) -> str:
     logger.info(f"Starting PDF processing: {pdf_url}")
     try:
-        resp = requests.get(pdf_url)
+        resp = requests.get(pdf_url, timeout=30)
         resp.raise_for_status()
         with pdfplumber.open(io.BytesIO(resp.content)) as pdf:
             texts = []

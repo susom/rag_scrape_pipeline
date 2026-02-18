@@ -18,6 +18,7 @@ from rag_pipeline.scraping.scraper import scrape_url
 from rag_pipeline.scraping.pdf_parser import process_pdfs
 from rag_pipeline.storage.storage import StorageManager
 from rag_pipeline.utils.logger import setup_logger
+from rag_pipeline.utils.urls import extract_urls_from_text
 from rag_pipeline.processing.sliding_window import SlidingWindowParser
 from rag_pipeline.processing.ai_client import DEFAULT_MODEL
 from rag_pipeline.output_json import write_canonical_json, generate_run_id
@@ -31,35 +32,6 @@ FollowMode = Literal["none", "attachments", "web"]
 MAX_FOLLOWED_URLS_PER_DOC = 20  # Maximum URLs to follow per document
 URL_FOLLOW_DELAY_SECONDS = 2     # Delay between processing each followed URL (rate limiting)
 
-
-def extract_urls_from_text(text: str) -> list[str]:
-    """
-    Extract unique http/https URLs from text.
-
-    Returns:
-        List of unique URLs found in the text.
-    """
-    # Regex pattern for http/https URLs
-    # Matches URLs with proper structure, avoiding common false positives
-    url_pattern = r'https?://[^\s<>"{}|\\^`\[\]]+'
-
-    urls = re.findall(url_pattern, text)
-
-    # Remove trailing punctuation that's likely not part of the URL
-    cleaned_urls = []
-    for url in urls:
-        url = url.rstrip('.,;:!?)')
-        cleaned_urls.append(url)
-
-    # Deduplicate while preserving order
-    seen = set()
-    unique_urls = []
-    for url in cleaned_urls:
-        if url not in seen:
-            seen.add(url)
-            unique_urls.append(url)
-
-    return unique_urls
 
 
 def run_pipeline(

@@ -1,5 +1,5 @@
 import os
-from datetime import datetime
+from datetime import datetime, timezone
 from google.cloud import storage
 from rag_pipeline.utils.logger import setup_logger
 
@@ -46,7 +46,7 @@ class StorageManager:
             logger.warning(f"Nothing to upload — '{self.base_path}' does not exist.")
             return
 
-        run_id = datetime.utcnow().strftime("%Y-%m-%dT%H-%M-%S")
+        run_id = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H-%M-%S")
         prefix = f"cache/{run_id}"
         to_upload = []
 

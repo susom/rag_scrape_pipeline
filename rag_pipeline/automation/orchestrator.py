@@ -71,6 +71,7 @@ class IngestionOrchestrator:
         self.errors = []
         self.start_time = datetime.now(timezone.utc)
         self._sp_client = None  # Lazy-initialized SharePoint client
+        self._url_content_hashes: Dict[str, bytes] = {}  # document_id → hash of raw scraped text
 
     def _get_sp_client(self) -> SharePointGraphClient:
         """Lazy-initialize SharePoint client for file downloads."""
@@ -228,7 +229,9 @@ class IngestionOrchestrator:
         """
         documents_to_process = []
 
-        # --- SharePoint files (timestamp-based) ---
+        # --- SharePoint files ---
+        # The manifest is already date-filtered by Graph API — every item returned
+        # was modified within the requested window. Process them all; no DB check needed.
         for sp_item in sharepoint_items:
             document_id = DocumentIngestionState.generate_document_id(
                 title=sp_item.name,
@@ -238,20 +241,14 @@ class IngestionOrchestrator:
             if filter_ids and document_id not in filter_ids:
                 continue
 
-            if self._sp_item_needs_processing(
-                document_id=document_id,
-                sp_item=sp_item,
-                force_reprocess=force_reprocess,
-            ):
-                documents_to_process.append({
-                    "document_id": document_id,
-                    "source_type": "sharepoint",
-                    "source_uri": sp_item.url,
-                    "file_name": sp_item.name,
-                    "download_url": sp_item.download_url,
-                    "date_modified": sp_item.last_modified,
-                })
-
+            documents_to_process.append({
+                "document_id": document_id,
+                "source_type": "sharepoint",
+                "source_uri": sp_item.url,
+                "file_name": sp_item.name,
+                "download_url": sp_item.download_url,
+                "date_modified": sp_item.last_modified,
+            })
             self._update_last_seen(document_id)
 
         # --- External URLs ---
@@ -270,8 +267,7 @@ class IngestionOrchestrator:
                 scrape_result = scrape_url(url, follow_attachments=False)
                 if scrape_result.get("error"):
                     logger.warning(f"Scrape failed for {url}: {scrape_result['error']}")
-                    self._update_last_seen(document_id)
-                    continue
+                    continue  # Don't update last_seen — scrape failure ≠ document gone
                 scraped_text = scrape_result.get("text", "")
             except Exception as e:
                 logger.error(f"Failed to scrape {url}: {e}")
@@ -280,8 +276,7 @@ class IngestionOrchestrator:
                     "document_id": document_id,
                     "message": str(e),
                 })
-                self._update_last_seen(document_id)
-                continue
+                continue  # Don't update last_seen — scrape failure ≠ document gone
 
             if not scraped_text or len(scraped_text.strip()) < 100:
                 logger.warning(f"Skipping {url}: insufficient scraped content")
@@ -294,6 +289,9 @@ class IngestionOrchestrator:
                 source_uri=url,
                 force_reprocess=force_reprocess,
             ):
+                # Cache the scraped-text hash so _ingest_to_rag stores the same
+                # value that delta detection will compare against next run.
+                self._url_content_hashes[document_id] = DocumentIngestionState.compute_content_hash(scraped_text)
                 documents_to_process.append({
                     "document_id": document_id,
                     "source_type": "url",
@@ -307,43 +305,6 @@ class IngestionOrchestrator:
             self._update_last_seen(document_id)
 
         return documents_to_process
-
-    def _sp_item_needs_processing(
-        self,
-        document_id: str,
-        sp_item: SharePointItem,
-        force_reprocess: bool = False,
-    ) -> bool:
-        """
-        Determine if a SharePoint file needs processing using Graph API's
-        lastModifiedDateTime. No download or hashing required — the timestamp
-        is authoritative (updates only on content/metadata changes, not views).
-        """
-        if force_reprocess:
-            logger.debug(f"Force reprocess: {document_id}")
-            return True
-
-        existing = self.db.query(DocumentIngestionState).filter(
-            DocumentIngestionState.document_id == document_id
-        ).first()
-
-        if not existing:
-            logger.info(f"New SharePoint file: {sp_item.name}")
-            return True
-
-        if not existing.last_processed_at:
-            logger.info(f"Never processed: {sp_item.name}")
-            return True
-
-        if sp_item.last_modified and sp_item.last_modified > existing.last_processed_at:
-            logger.info(
-                f"SharePoint file modified: {sp_item.name} "
-                f"(modified={sp_item.last_modified}, last_processed={existing.last_processed_at})"
-            )
-            return True
-
-        logger.debug(f"SharePoint file unchanged: {sp_item.name}")
-        return False
 
     def _should_process_url(
         self,
@@ -631,10 +592,16 @@ class IngestionOrchestrator:
                 DocumentIngestionState.document_id == document_id
             ).first()
 
-            # Compute content hash from all section text
-            import hashlib
-            all_content = "".join(s.get("text", "") for s in sections)
-            content_hash = hashlib.sha256(all_content.encode("utf-8")).digest()
+            # Compute content hash:
+            # - URL docs: use the hash of raw scraped text cached during delta detection,
+            #   so the stored hash matches what delta detection will compare next run.
+            # - SP docs: compute from section text (timestamp is the authoritative
+            #   change signal for SharePoint, hash is stored for reference only).
+            if document_id in self._url_content_hashes:
+                content_hash = self._url_content_hashes[document_id]
+            else:
+                full_text = "\n\n".join(s.get("text", "") for s in sections)
+                content_hash = DocumentIngestionState.compute_content_hash(full_text)
 
             if not db_record:
                 db_record = DocumentIngestionState(
@@ -769,11 +736,6 @@ class IngestionOrchestrator:
                     "error": "All sections failed to ingest",
                 })
 
-            # Update content hash
-            full_text = "\n\n".join(s["text"] for s in sections)
-            db_record.content_hash = DocumentIngestionState.compute_content_hash(full_text)
-            db_record.last_content_update_at = datetime.now(timezone.utc)
-
             # Commit database changes for this document
             try:
                 self.db.commit()
@@ -820,6 +782,7 @@ def run_automated_ingestion(
     force_reprocess: bool = False,
     document_ids: Optional[List[str]] = None,
     dry_run: bool = False,
+    modified_since: Optional[datetime] = None,
 ) -> IngestionResult:
     """
     Run automated ingestion workflow.
@@ -831,6 +794,9 @@ def run_automated_ingestion(
         force_reprocess: Ignore hash comparison, reprocess all
         document_ids: Only process these specific document IDs
         dry_run: Report changes without ingesting
+        modified_since: Only fetch SharePoint files modified since this datetime.
+                        external-urls.txt is always fetched regardless.
+                        None = fetch all files (full sync).
 
     Returns:
         IngestionResult with summary statistics
@@ -846,4 +812,5 @@ def run_automated_ingestion(
     return orchestrator.run(
         force_reprocess=force_reprocess,
         document_ids=document_ids,
+        modified_since=modified_since,
     )
