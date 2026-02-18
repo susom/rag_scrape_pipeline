@@ -58,6 +58,38 @@ class DocumentIngestionState(Base):
     file_name = Column(String(512), nullable=True)
     url = Column(Text, nullable=True)
 
+    # RAG vector database tracking fields
+    rag_vector_id = Column(String(255), nullable=True, index=True)
+    # Pinecone vector ID — representative (first section). Kept for backward compat.
+
+    rag_vector_ids = Column(Text, nullable=True)
+    # JSON array of ALL section vector IDs for this document.
+    # Used for full cleanup on re-ingestion.
+
+    rag_namespace = Column(String(255), nullable=True)
+    # Vector namespace
+
+    rag_last_ingested_at = Column(DateTime(), nullable=True, index=True)
+    # Last successful ingestion timestamp
+
+    rag_ingestion_status = Column(String(50), default="pending", index=True)
+    # "pending" | "processing" | "completed" | "failed" | "permanently_failed"
+
+    rag_error_message = Column(Text, nullable=True)
+    # Error details if ingestion failed
+
+    rag_retry_count = Column(Integer, default=0, nullable=False)
+    # Retry attempt counter
+
+    sections_processed = Column(Integer, default=0, nullable=False)
+    # Successful section count
+
+    sections_total = Column(Integer, default=0, nullable=False)
+    # Total section count
+
+    last_seen_at = Column(DateTime(), nullable=True, index=True)
+    # Last time seen in source (for deletion detection)
+
     def __repr__(self):
         return f"<DocumentIngestionState(id={self.id}, document_id='{self.document_id}', file_name='{self.file_name}')>"
 
@@ -104,6 +136,28 @@ class DocumentIngestionState(Base):
 
 
 # Keep User model for future use (will be created when needed)
+class IngestionLock(Base):
+    """
+    Distributed lock for preventing concurrent ingestion runs.
+    """
+    __tablename__ = "ingestion_locks"
+
+    lock_key = Column(String(255), primary_key=True)
+    # Lock identifier (e.g., "automated_ingestion")
+
+    acquired_at = Column(DateTime(), nullable=False)
+    # When lock was acquired
+
+    acquired_by = Column(String(255), nullable=False)
+    # hostname:pid of process that acquired lock
+
+    expires_at = Column(DateTime(), nullable=False, index=True)
+    # When lock expires (for stale lock cleanup)
+
+    def __repr__(self):
+        return f"<IngestionLock(lock_key='{self.lock_key}', acquired_by='{self.acquired_by}', expires_at='{self.expires_at}')>"
+
+
 class User(Base):
     """
     User model for authentication and tracking document ownership.

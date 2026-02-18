@@ -13,7 +13,9 @@ Handles pagination and authentication via Azure AD.
 import os
 import time
 import requests
-from typing import Optional, Generator, Any
+from typing import Optional, Generator, Any, List
+from datetime import datetime
+from dataclasses import dataclass
 from rag_pipeline.utils.logger import setup_logger
 
 logger = setup_logger()
@@ -25,6 +27,24 @@ try:
 except ImportError:
     HAS_SECRET_MANAGER = False
     logger.warning("google-cloud-secret-manager not installed. Using environment variables for credentials.")
+
+
+@dataclass
+class SharePointItem:
+    """
+    Represents a document or folder in SharePoint (manifest only).
+
+    Text extraction happens in the pipeline, not here.
+    """
+    sharepoint_id: str
+    name: str
+    item_type: str  # "file" or "folder"
+    url: str  # webUrl
+    download_url: Optional[str] = None  # @microsoft.graph.downloadUrl (files only)
+    mime_type: Optional[str] = None  # Files only
+    size: Optional[int] = None  # Files only
+    last_modified: Optional[datetime] = None
+    created_by: Optional[str] = None
 
 
 class SharePointGraphClient:
@@ -880,4 +900,101 @@ class SharePointGraphClient:
         url = f"/sites/{site_id}"
 
         return self._make_request("GET", url)
+
+    # ==================== Automation / Ingestion ====================
+
+    SUPPORTED_FILE_EXTENSIONS = {".docx", ".pdf", ".txt", ".doc"}
+
+    def get_document_manifest(
+        self,
+        folder_path: str = "",
+        modified_since: Optional[datetime] = None,
+        drive_id: Optional[str] = None,
+    ) -> List[SharePointItem]:
+        """
+        Fetch document manifest from a SharePoint drive folder.
+
+        Lists files recursively, filters by supported extensions and optional
+        modification date, and returns structured SharePointItem objects.
+
+        Args:
+            folder_path: Folder path within the drive (empty for root)
+            modified_since: Only return items modified after this datetime
+            drive_id: Specific drive ID (uses default drive if None)
+
+        Returns:
+            List of SharePointItem objects (files only, manifest metadata)
+        """
+        if modified_since:
+            logger.info(f"Fetching manifest (modified since {modified_since.isoformat()})" +
+                        (f" from folder '{folder_path}'" if folder_path else ""))
+        else:
+            logger.info("Fetching manifest" +
+                        (f" from folder '{folder_path}'" if folder_path else ""))
+
+        # Use get_drive_items with recursive=True to walk the full tree
+        raw_items = list(self.get_drive_items(
+            drive_id=drive_id,
+            folder_path=folder_path,
+            recursive=True,
+        ))
+
+        manifest = []
+
+        for item in raw_items:
+            # Skip folders
+            if item.get("folder"):
+                continue
+
+            name = item.get("name", "")
+
+            # Filter to supported file types
+            ext = "." + name.lower().rsplit(".", 1)[-1] if "." in name else ""
+            if ext not in self.SUPPORTED_FILE_EXTENSIONS:
+                logger.debug(f"Skipping unsupported file type: {name}")
+                continue
+
+            # Parse last modified datetime
+            last_modified_str = item.get("lastModifiedDateTime")
+            last_modified = None
+            if last_modified_str:
+                try:
+                    last_modified = datetime.fromisoformat(last_modified_str.replace("Z", "+00:00"))
+                except (ValueError, AttributeError):
+                    pass
+
+            # Client-side date filter
+            if modified_since and last_modified:
+                if last_modified < modified_since:
+                    continue
+
+            manifest.append(SharePointItem(
+                sharepoint_id=item.get("id", ""),
+                name=name,
+                item_type="file",
+                url=item.get("webUrl", ""),
+                download_url=item.get("@microsoft.graph.downloadUrl"),
+                mime_type=item.get("file", {}).get("mimeType"),
+                size=item.get("size"),
+                last_modified=last_modified,
+            ))
+
+        logger.info(f"Found {len(manifest)} files in manifest")
+        return manifest
+
+    def download_file_content(self, download_url: str) -> bytes:
+        """
+        Download file content from a pre-signed Graph API download URL.
+
+        Used by the automation orchestrator for hashing and text extraction.
+
+        Args:
+            download_url: Pre-signed download URL from @microsoft.graph.downloadUrl
+
+        Returns:
+            File content as bytes
+        """
+        response = requests.get(download_url, timeout=120)
+        response.raise_for_status()
+        return response.content
 

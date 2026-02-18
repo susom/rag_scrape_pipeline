@@ -12,16 +12,10 @@ import json
 import os
 import re
 import time
-import pdfplumber
-import io
 import hashlib
 
-try:
-    import docx2txt
-except ImportError:
-    docx2txt = None
-
 from rag_pipeline.main import run_pipeline
+from rag_pipeline.processing.text_extraction import extract_text_from_file, get_thinker_name
 from rag_pipeline.output_json import generate_run_id, write_canonical_json, RPP_VERSION
 from rag_pipeline.utils.logger import setup_logger
 from rag_pipeline.processing.sliding_window import SlidingWindowParser
@@ -601,40 +595,20 @@ def upload_file(
         text = ""
 
         try:
-            if filename_lower.endswith(".txt"):
-                text = file_content.decode("utf-8", errors="ignore")
-
-            elif filename_lower.endswith(".docx"):
-                if docx2txt is None:
-                    raise HTTPException(status_code=500, detail="docx2txt not installed")
-                text = docx2txt.process(file_path)
-
-            elif filename_lower.endswith(".pdf"):
-                try:
-                    with pdfplumber.open(io.BytesIO(file_content)) as pdf:
-                        pages = [page.extract_text() or "" for page in pdf.pages]
-                        text = "\n\n".join(pages)
-                except Exception as e:
-                    logger.error(f"PDF parsing failed for {file.filename}: {e}")
-                    documents.append({
-                        "uri": f"file://{file.filename}",
-                        "source_type": "pdf",
-                        "cached_files": {},
-                        "followed_from": None,
-                        "sections": [],
-                        "errors": [f"PDF parsing failed: {e}"],
-                    })
-                    continue
-
-            else:
-                logger.warning(f"Unsupported file type: {file.filename}")
+            try:
+                text = extract_text_from_file(file.filename, file_content)
+            except ValueError as e:
+                error_msg = str(e)
+                logger.error(f"Text extraction failed for {file.filename}: {error_msg}")
+                # Determine source_type for error entry
+                ext = filename_lower.split(".")[-1] if "." in filename_lower else "unknown"
                 documents.append({
                     "uri": f"file://{file.filename}",
-                    "source_type": "unknown",
+                    "source_type": ext,
                     "cached_files": {},
                     "followed_from": None,
                     "sections": [],
-                    "errors": ["Unsupported file type. Use PDF, DOCX, or TXT."],
+                    "errors": [error_msg],
                 })
                 continue
 
@@ -655,13 +629,7 @@ def upload_file(
             with open(txt_path, "w", encoding="utf-8") as f:
                 f.write(text)
 
-            # Determine thinker_name based on file type for source-aware prompts
-            if filename_lower.endswith(".docx"):
-                thinker_name = "DOCX"
-            elif filename_lower.endswith(".pdf"):
-                thinker_name = "PDF"
-            else:
-                thinker_name = "default"
+            thinker_name = get_thinker_name(file.filename)
 
             # Process through sliding window + AI
             try:
@@ -1296,3 +1264,117 @@ def search_sharepoint(
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Search failed: {e}")
 
+
+# ==================== Automated Ingestion Endpoint ====================
+
+@app.post("/api/ingest-batch")
+async def ingest_batch(
+    force_reprocess: bool = False,
+    document_ids: str = None,
+    dry_run: bool = False,
+    db: Session = Depends(get_db),
+):
+    """
+    Automated batch ingestion endpoint.
+
+    Workflow:
+    1. Fetch content from SharePoint and external URLs
+    2. Detect changed/new documents via hash comparison
+    3. Process through RAG pipeline
+    4. Ingest sections into RAG vector database
+    5. Update database with tracking info
+
+    Query params:
+        - force_reprocess: Ignore hash, reprocess all documents
+        - document_ids: Comma-separated list of specific document IDs to process
+        - dry_run: Report changes without actually ingesting
+
+    Returns:
+        {
+            "status": "completed" | "failed" | "locked",
+            "run_id": "ingest_2025-02-13T10-30-00Z",
+            "summary": {
+                "documents_processed": 12,
+                "sections_ingested": 143,
+                "documents_skipped": 45,
+                "documents_failed": 2,
+                "processing_time_seconds": 120.5
+            },
+            "errors": [...],
+            "dry_run": false
+        }
+
+    Status codes:
+        - 200: Success (may include partial failures in errors array)
+        - 409: Conflict - another ingestion already in progress
+        - 500: Fatal error
+    """
+    from rag_pipeline.automation.locking import DistributedLock, LockAlreadyHeld
+    from rag_pipeline.automation.orchestrator import run_automated_ingestion
+    from fastapi.responses import JSONResponse
+
+    # Parse document_ids if provided
+    doc_id_list = None
+    if document_ids:
+        doc_id_list = [id.strip() for id in document_ids.split(",") if id.strip()]
+
+    try:
+        # Acquire distributed lock to prevent concurrent runs
+        with DistributedLock(
+            lock_key="automated_ingestion",
+            db_session=db,
+            timeout_minutes=60,
+        ):
+            # Run automated ingestion
+            result = run_automated_ingestion(
+                db_session=db,
+                force_reprocess=force_reprocess,
+                document_ids=doc_id_list,
+                dry_run=dry_run,
+            )
+
+            # Build response
+            response = {
+                "status": result.status,
+                "run_id": result.run_id,
+                "summary": {
+                    "documents_processed": result.documents_processed,
+                    "sections_ingested": result.sections_ingested,
+                    "documents_skipped": result.documents_skipped,
+                    "documents_failed": result.documents_failed,
+                    "processing_time_seconds": result.processing_time_seconds,
+                },
+                "errors": result.errors,
+                "dry_run": result.dry_run,
+            }
+
+            # Return appropriate status code
+            if result.status == "failed":
+                return JSONResponse(
+                    status_code=500,
+                    content=response,
+                )
+
+            return response
+
+    except LockAlreadyHeld as e:
+        logger.warning(f"Ingestion already in progress: {e}")
+        return JSONResponse(
+            status_code=409,
+            content={
+                "status": "locked",
+                "message": str(e),
+                "run_id": None,
+            },
+        )
+
+    except Exception as e:
+        logger.error(f"Ingestion endpoint error: {e}", exc_info=True)
+        return JSONResponse(
+            status_code=500,
+            content={
+                "status": "failed",
+                "message": str(e),
+                "run_id": None,
+            },
+        )

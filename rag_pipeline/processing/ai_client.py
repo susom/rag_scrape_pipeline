@@ -9,7 +9,7 @@ load_dotenv()
 logger = setup_logger()
 
 # Default model for RPP extraction
-DEFAULT_MODEL = "o1"
+DEFAULT_MODEL = "gpt-4.1"
 
 # Available models via SecureChatAI adapter
 AVAILABLE_MODELS = [

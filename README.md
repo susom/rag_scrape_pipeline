@@ -26,16 +26,26 @@ A modular pipeline for scraping, parsing, and processing content into RAG-ready 
 - **Canonical JSON output** (`cache/rag_ready/{run_id}.json`)
 - **GCS storage** integration (optional)
 - **SharePoint integration** (input/output storage, automation)
+- **Automated ingestion** (cron-triggered, delta detection, vector cleanup)
+- **Database tracking** (Cloud SQL / MySQL — document state, ingestion history, distributed locks)
 - **CI/CD deployment** (auto-deploy on git push)
 
 ---
 
 ## Pipeline Flow
 
+**Manual (Web UI / CLI):**
 ```mermaid
 flowchart LR
-    A[URLs] --> B[Scraper/PDF Parser] --> C[cache/raw]
-    C --> D[Sliding Window] --> E[cache/rag_ready JSON]
+    A[URLs / Files] --> B[Scraper/PDF Parser] --> C[cache/raw]
+    C --> D[Sliding Window + AI] --> E[cache/rag_ready JSON]
+```
+
+**Automated (Cron):**
+```mermaid
+flowchart LR
+    A[SharePoint + URLs] --> B[Delta Detection] --> C[Changed Docs Only]
+    C --> D[AI Pipeline] --> E[JSON] --> F[RAG Vector DB]
 ```
 
 ---
@@ -114,6 +124,32 @@ Parameters:
 
 **GET /health** - Health check
 
+**POST /api/ingest-batch** - Automated batch ingestion (cron-triggered)
+```bash
+curl -X POST "http://localhost:9090/api/ingest-batch?dry_run=true"
+```
+Query params:
+- `force_reprocess`: Ignore hashes, reprocess all documents (default: false)
+- `document_ids`: Comma-separated list of specific document IDs
+- `dry_run`: Report changes without ingesting (default: false)
+
+Response:
+```json
+{
+  "status": "completed",
+  "run_id": "ingest_2026-02-17T10-30-00Z",
+  "summary": {
+    "documents_processed": 12,
+    "sections_ingested": 143,
+    "documents_skipped": 45,
+    "documents_failed": 2,
+    "processing_time_seconds": 120.5
+  },
+  "errors": [],
+  "dry_run": false
+}
+```
+
 ### CLI
 
 Run the pipeline from command line:
@@ -166,7 +202,7 @@ Schema version: `rpp.v1`
 ├── README.md
 ├── CLAUDE.md
 └── rag_pipeline/
-    ├── web.py              # FastAPI web interface (primary)
+    ├── web.py              # FastAPI web interface + /api/ingest-batch
     ├── main.py             # CLI entrypoint + run_pipeline()
     ├── cli.py              # Interactive CLI
     ├── output_json.py      # Canonical JSON writer
@@ -174,8 +210,18 @@ Schema version: `rpp.v1`
     │   ├── scraper.py
     │   └── pdf_parser.py
     ├── processing/
-    │   ├── ai_client.py    # SecureChatAI proxy
-    │   └── sliding_window.py
+    │   ├── ai_client.py         # SecureChatAI proxy
+    │   ├── sliding_window.py
+    │   └── text_extraction.py   # Shared file→text (PDF/DOCX/TXT)
+    ├── automation/
+    │   ├── orchestrator.py      # Cron ingestion workflow
+    │   ├── content_fetcher.py   # SharePoint + URL fetching
+    │   ├── sharepoint_client.py # Microsoft Graph API
+    │   ├── rag_client.py        # REDCap RAG EM API
+    │   └── locking.py           # Distributed lock
+    ├── database/
+    │   ├── models.py            # SQLAlchemy models
+    │   └── migrations/          # Schema migrations
     ├── storage/
     │   └── storage.py
     └── utils/
@@ -192,6 +238,10 @@ Schema version: `rpp.v1`
 | `REDCAP_API_TOKEN` | Yes | REDCap API token |
 | `GCS_BUCKET` | No | GCS bucket for artifact upload |
 | `STORAGE_MODE` | No | `local` (default) or `gcs` |
+| `SHAREPOINT_TENANT_ID` | For automation | Azure AD tenant ID |
+| `SHAREPOINT_CLIENT_ID` | For automation | App registration client ID |
+| `SHAREPOINT_CLIENT_SECRET` | For automation | App registration secret |
+| `SHAREPOINT_SITE_URL` | For automation | SharePoint site URL |
 
 ---
 
@@ -262,30 +312,32 @@ The pipeline uses **source-type-aware extraction** to apply the right level of f
 
 ---
 
-## SharePoint Integration
+## SharePoint Integration & Automated Ingestion
 
-The pipeline integrates with SharePoint for input/output storage and automation:
+The pipeline fetches content from SharePoint and ingests it into the RAG vector database on a cron schedule.
 
-**Input Sources:**
-- **Source Documents** library: DOCX, PDF, TXT files to process
-- **Source URLs** library: `.txt` files with URL lists (one per line)
+**Input Sources (via Microsoft Graph API):**
+- **Document manifest**: DOCX, PDF, TXT files from a configured SharePoint folder
+- **External URLs page**: A SharePoint page containing links to scrape
 
-**Outputs:**
-- **Pipeline Outputs** library: Generated JSON files organized by date
-- **Processing Log** list: Metadata tracking (run_id, timestamp, status, files processed)
+**Automated Workflow (`POST /api/ingest-batch`):**
+1. Acquire distributed lock (prevents concurrent runs)
+2. Fetch document manifest + external URLs from SharePoint
+3. Delta detection (SP files: timestamp from Graph API; URLs: content hash)
+4. Process changed documents through AI pipeline
+5. Ingest sections into RAG vector database (Pinecone via REDCap EM API)
+6. Clean up stale vectors on re-ingestion
 
-**Automation Strategies:**
-- **Power Automate**: Monitor SharePoint libraries for changes, trigger processing
-- **Delta Detection**: Track file modification dates and content hashes to skip unchanged content
-- **Scheduled Runs**: Weekly/daily processing of URL lists with delta checking
+**Database Tracking (Cloud SQL / MySQL):**
+- `document_ingestion_state` table: content hash, vector IDs, ingestion status, retry counts
+- `ingestion_locks` table: distributed locking across Cloud Run instances
+- Migrations in `rag_pipeline/database/migrations/`
 
 **Benefits:**
-- Centralized document storage
-- Audit trail and version control via SharePoint
-- Automated processing on file updates
-- 70-90% reduction in redundant processing
-
-See SharePoint wiki page for detailed integration workflows.
+- Only changed documents are re-processed (hash-based delta detection)
+- Full vector cleanup on re-ingestion (no orphaned vectors)
+- Failure-safe: partial failures keep old vectors intact
+- Distributed locking prevents duplicate processing
 
 ---
 
