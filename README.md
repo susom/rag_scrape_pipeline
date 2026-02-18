@@ -238,10 +238,20 @@ Schema version: `rpp.v1`
 | `REDCAP_API_TOKEN` | Yes | REDCap API token |
 | `GCS_BUCKET` | No | GCS bucket for artifact upload |
 | `STORAGE_MODE` | No | `local` (default) or `gcs` |
+| **SharePoint (for automation)** | | |
 | `SHAREPOINT_TENANT_ID` | For automation | Azure AD tenant ID |
 | `SHAREPOINT_CLIENT_ID` | For automation | App registration client ID |
 | `SHAREPOINT_CLIENT_SECRET` | For automation | App registration secret |
 | `SHAREPOINT_SITE_URL` | For automation | SharePoint site URL |
+| `SHAREPOINT_DRIVE_ID` | No | Drive ID (auto-detected if omitted) |
+| `SHAREPOINT_FOLDER_PATH` | No | Folder path (default: `Shared Documents`) |
+| `SHAREPOINT_URLS_PAGE_ID` | No | SharePoint page ID for external URLs |
+| **Database (for automation)** | | |
+| `DB_USER` | For automation | Database username |
+| `DB_PASSWORD` | For automation | Database password |
+| `DB_NAME` | No | Database name (default: `document_ingestion_state`) |
+| `CLOUD_SQL_CONNECTION_NAME` | No | Cloud SQL instance connection name |
+| `DB_SOCKET_DIR` | No | Unix socket directory (default: `/socket`) |
 
 ---
 
@@ -317,16 +327,24 @@ The pipeline uses **source-type-aware extraction** to apply the right level of f
 The pipeline fetches content from SharePoint and ingests it into the RAG vector database on a cron schedule.
 
 **Input Sources (via Microsoft Graph API):**
-- **Document manifest**: DOCX, PDF, TXT files from a configured SharePoint folder
-- **External URLs page**: A SharePoint page containing links to scrape
+- **Document manifest**: DOCX, PDF, TXT files from a configured SharePoint folder (filtered by `modified_since` date)
+- **External URLs file**: `external-urls.txt` in Shared Documents - URLs extracted and scraped every run (bypasses date filter)
 
 **Automated Workflow (`POST /api/ingest-batch`):**
 1. Acquire distributed lock (prevents concurrent runs)
-2. Fetch document manifest + external URLs from SharePoint
-3. Delta detection (SP files: timestamp from Graph API; URLs: content hash)
-4. Process changed documents through AI pipeline
-5. Ingest sections into RAG vector database (Pinecone via REDCap EM API)
-6. Clean up stale vectors on re-ingestion
+2. Fetch document manifest (respecting `modified_since` date filter) + external URLs from SharePoint
+3. **external-urls.txt** is always fetched regardless of date - URLs inside are extracted every run
+4. Delta detection:
+   - SharePoint files: `lastModifiedDateTime` from Graph API vs `last_processed_at` in DB
+   - External URLs: SHA-256 hash of scraped content vs `content_hash` in DB
+5. Process changed documents through AI pipeline
+6. Ingest sections into RAG vector database (Pinecone via REDCap EM API)
+7. Clean up stale vectors on re-ingestion
+
+**Date Filtering:**
+- SharePoint files respect `modified_since` parameter (e.g., 7 days for weekly cron)
+- `external-urls.txt` is **always fetched** (bypasses date filter) - the URLs inside may change even if the file doesn't
+- Client-side filtering (reliable, avoids Graph API OData filter syntax issues)
 
 **Database Tracking (Cloud SQL / MySQL):**
 - `document_ingestion_state` table: content hash, vector IDs, ingestion status, retry counts
@@ -338,6 +356,7 @@ The pipeline fetches content from SharePoint and ingests it into the RAG vector 
 - Full vector cleanup on re-ingestion (no orphaned vectors)
 - Failure-safe: partial failures keep old vectors intact
 - Distributed locking prevents duplicate processing
+- Efficient: Date filtering reduces API calls and processing time
 
 ---
 
