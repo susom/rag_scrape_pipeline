@@ -216,7 +216,6 @@ Schema version: `rpp.v1`
     ├── automation/
     │   ├── orchestrator.py      # Cron ingestion workflow
     │   ├── content_fetcher.py   # SharePoint + URL fetching
-    │   ├── sharepoint_client.py # Microsoft Graph API
     │   ├── rag_client.py        # REDCap RAG EM API
     │   └── locking.py           # Distributed lock
     ├── database/
