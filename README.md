@@ -256,42 +256,40 @@ Schema version: `rpp.v1`
 
 ## Production Deployment (Cloud Run)
 
-**⚠️ CRITICAL:** When deploying to Cloud Run, you must increase the request timeout from the default 5 minutes to 60 minutes to support link-following operations.
+**⚠️ CRITICAL:** When deploying to Cloud Run, increase the request timeout from the default 5 minutes to 60 minutes to support link-following operations.
 
-### Cloud Run → Cloud SQL Connectivity
+### Secrets
 
-When deploying to Cloud Run, the service needs access to Cloud SQL. This requires one of:
+Store all sensitive values in Google Secret Manager. Required secrets:
+- `REDCAP_API_URL`
+- `REDCAP_API_TOKEN`
+- `GCS_BUCKET`
+- `DB_USER` / `DB_PASSWORD` (or `RAG_DB_USER` / `RAG_DB_PASSWORD`)
+- `DB_SOCKET_DIR` (e.g., `/cloudsql`)
+- `SHAREPOINT_CLIENT_ID`
+- `SHAREPOINT_CLIENT_SECRET`
+- `SHAREPOINT_TENANT_ID`
 
-1. **VPC Connector** (recommended): Create a VPC connector to route traffic through your VPC
-2. **Organization Policy Exception**: Ask your security team to allow `cloudrun.googleapis.com` to access `sql.googleapis.com`
+### Deploy via gcloud
 
-**Without this, you'll see:**
-```
-Request is prohibited by organization's policy. vpcServiceControlsUniqueIdentifier: ...
-```
-
-**To create a VPC connector:**
 ```bash
-gcloud compute networks vpc-access connectors create rag-connector \
-  --region=us-west1 \
-  --network=default \
-  --range=10.64.0.0/28
+gcloud run deploy production-pipeline \
+  --image="us-west1-docker.pkg.dev/$PROJECT_ID/rag-scrape-pipeline/rag_scrape_pipeline:$TAG" \
+  --region="us-west1" \
+  --platform=managed \
+  --ingress=internal-and-cloud-load-balancing \
+  --min-instances=1 \
+  --max-instances=3 \
+  --allow-unauthenticated \
+  --cpu=2 \
+  --memory=4Gi \
+  --port=8080 \
+  --set-secrets=REDCAP_API_URL=REDCAP_API_URL:latest,REDCAP_API_TOKEN=REDCAP_API_TOKEN:latest,GCS_BUCKET=GCS_BUCKET:latest,DB_USER=RAG_DB_USER:latest,DB_PASSWORD=RAG_DB_PASSWORD:latest,DB_SOCKET_DIR=RAG_DB_SOCKET_DIR:latest,SHAREPOINT_CLIENT_ID=SHAREPOINT_CLIENT_ID:latest,SHAREPOINT_CLIENT_SECRET=SHAREPOINT_CLIENT_SECRET:latest,SHAREPOINT_TENANT_ID=SHAREPOINT_TENANT_ID:latest \
+  --set-cloudsql-instances=$PROJECT_ID:us-west1:redcap-rag \
+  --timeout=3600
 ```
 
-Then deploy with `--vpc-connector=rag-connector`
-
-**Via Google Cloud Console:**
-1. Go to Cloud Run → Select your service
-2. "Edit & Deploy New Revision" → "Container" tab
-3. Set "Request timeout" to **3600** seconds
-4. Deploy
-
-**Via gcloud CLI:**
-```bash
-gcloud run services update YOUR_SERVICE_NAME --timeout=3600 --region=YOUR_REGION
-```
-
-Without this change, link-following operations on large batches will timeout and fail.
+**Note:** `--set-cloudsql-instances` enables Cloud SQL Auth Proxy automatically. If blocked by organization policy, use `--set-env-vars=DB_HOST=<public-ip>` with authorized networks instead.
 
 ---
 
