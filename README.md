@@ -258,6 +258,28 @@ Schema version: `rpp.v1`
 
 **⚠️ CRITICAL:** When deploying to Cloud Run, you must increase the request timeout from the default 5 minutes to 60 minutes to support link-following operations.
 
+### Cloud Run → Cloud SQL Connectivity
+
+When deploying to Cloud Run, the service needs access to Cloud SQL. This requires one of:
+
+1. **VPC Connector** (recommended): Create a VPC connector to route traffic through your VPC
+2. **Organization Policy Exception**: Ask your security team to allow `cloudrun.googleapis.com` to access `sql.googleapis.com`
+
+**Without this, you'll see:**
+```
+Request is prohibited by organization's policy. vpcServiceControlsUniqueIdentifier: ...
+```
+
+**To create a VPC connector:**
+```bash
+gcloud compute networks vpc-access connectors create rag-connector \
+  --region=us-west1 \
+  --network=default \
+  --range=10.64.0.0/28
+```
+
+Then deploy with `--vpc-connector=rag-connector`
+
 **Via Google Cloud Console:**
 1. Go to Cloud Run → Select your service
 2. "Edit & Deploy New Revision" → "Container" tab
