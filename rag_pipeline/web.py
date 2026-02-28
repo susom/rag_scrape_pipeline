@@ -616,7 +616,7 @@ def upload_file(
                             continue
 
                         # Save the scraped text
-                        url_safe_name = url.replace("https://", "").replace("http://", "").replace("/", "_")[:80]
+                        url_safe_name = url.replace("https://", "").replace("http://", "").replace("/", "_")[:80];
                         url_txt_path = os.path.join("cache/raw", f"{url_safe_name}_followed.txt")
                         with open(url_txt_path, "w", encoding="utf-8") as f:
                             f.write(url_text)
@@ -1308,3 +1308,47 @@ async def ingest_batch(
                 "run_id": None,
             },
         )
+
+
+# Path to templates directory
+TEMPLATES_DIR = os.path.join(os.path.dirname(__file__), "templates")
+
+
+def load_template(template_name: str) -> str:
+    """
+    Load an HTML template from the templates directory.
+
+    Args:
+        template_name: Name of the template file (e.g., 'compare.html')
+
+    Returns:
+        The template content as a string
+
+    Raises:
+        HTTPException: If template file is not found
+    """
+    template_path = os.path.join(TEMPLATES_DIR, template_name)
+    if not os.path.exists(template_path):
+        raise HTTPException(status_code=500, detail=f"Template not found: {template_name}")
+
+    with open(template_path, "r", encoding="utf-8") as f:
+        return f.read()
+
+
+@app.get("/compare", response_class=HTMLResponse, tags=["Pipeline"])
+def compare_buckets():
+    """
+    Compare contents of two buckets (A and B) with side-by-side diff view.
+    Highlights differences in file count, missing files, and content differences.
+
+    Returns an HTML page that allows users to:
+    - View files from both Rexi Content (ingested) and Sharepoint Content
+    - Filter by status (all, different, missing, identical)
+    - Search by filename
+    - Navigate through differences
+    - View side-by-side content diff for selected files
+    """
+    return HTMLResponse(content=load_template("compare.html"))
+
+
+

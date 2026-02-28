@@ -1,0 +1,1013 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>RPP - Content Comparison</title>
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.8/dist/css/bootstrap.min.css" rel="stylesheet" integrity="sha384-sRIl4kxILFvY47J16cr9ZwB07vP4J8+LH7qKQnuqkuIAvNWLzeN8tE5YBujZqJLB" crossorigin="anonymous">
+    <style>
+        /* Custom styles that complement Bootstrap */
+        body { background: #f8f9fa; }
+
+        /* File List */
+        .file-list { max-height: 600px; overflow-y: auto; }
+        .file-item { padding: 12px 20px; border-bottom: 1px solid #dee2e6; cursor: pointer; transition: background 0.2s; background: #fff; border-left: 3px solid transparent; }
+        .file-item:hover { background: #f8f9fa; }
+        .file-item.selected { background: #e1bee7 !important; border-left: 4px solid #9c27b0 !important; box-shadow: inset 0 0 0 2px #9c27b0; }
+        .file-item.missing { background: #fff; border-left-color: #dc3545; }
+        .file-item.different { background: #fff; border-left-color: #ffc107; }
+        .file-item.identical { background: #fff; border-left-color: #198754; }
+        .file-item.only-here { background: #fff; border-left-color: #0d6efd; }
+
+        /* Diff Panel */
+        .diff-content { display: flex; max-height: 600px; overflow: hidden; }
+        .diff-side { flex: 1; padding: 0; font-family: 'SF Mono', 'Monaco', 'Consolas', monospace; font-size: 12px; white-space: pre-wrap; word-break: break-word; overflow-y: auto; max-height: 600px; border-right: 1px solid #dee2e6; }
+        .diff-side:last-child { border-right: none; }
+        .diff-side-header { position: sticky; top: 0; padding: 8px 15px; font-weight: 600; font-size: 11px; text-transform: uppercase; letter-spacing: 0.5px; border-bottom: 1px solid #dee2e6; z-index: 10; }
+        .diff-side-header.side-a { background: #cfe2ff; color: #084298; }
+        .diff-side-header.side-b { background: #d1e7dd; color: #0f5132; }
+        .diff-line { padding: 2px 15px; line-height: 1.5; border-left: 3px solid transparent; }
+        .diff-line.added { background: #d1e7dd; border-left-color: #198754; }
+        .diff-line.removed { background: #f8d7da; border-left-color: #dc3545; }
+        .diff-line.changed { background: #fff3cd; border-left-color: #ffc107; }
+        .diff-line .line-number { display: inline-block; width: 40px; color: #6c757d; font-size: 11px; user-select: none; margin-right: 10px; text-align: right; }
+        .diff-line.changed .highlight-change { background: #ffc107; padding: 1px 2px; border-radius: 2px; }
+        .diff-line.current-change { outline: 2px solid #6f42c1; outline-offset: -2px; background: #e2d9f3 !important; }
+        .diff-placeholder { color: #6c757d; font-style: italic; padding: 40px; text-align: center; }
+
+        /* Legend colors */
+        .legend-color { width: 16px; height: 16px; border-radius: 3px; display: inline-block; }
+        .legend-color.identical { background: #d1e7dd; border: 1px solid #198754; }
+        .legend-color.different { background: #fff3cd; border: 1px solid #ffc107; }
+        .legend-color.missing { background: #f8d7da; border: 1px solid #dc3545; }
+        .legend-color.only-here { background: #cfe2ff; border: 1px solid #0d6efd; }
+
+        /* Summary card count colors */
+        .count-primary { color: #0d6efd; }
+        .count-success { color: #198754; }
+        .count-warning { color: #fd7e14; }
+        .count-success-light { color: #198754; }
+    </style>
+</head>
+<body class="py-4">
+    <div class="container-xl">
+        <h1 class="mb-1">Content Comparison</h1>
+        <p class="text-muted mb-4">Compare files between Rexi content ingested and Sharepoint content</p>
+
+        <!-- Summary Cards -->
+        <div class="row g-3 mb-4">
+            <div class="col-md-4">
+                <div class="card h-100 border-primary border-start border-2">
+                    <div class="card-body">
+                        <h6 class="card-subtitle mb-2 text-uppercase text-muted small">Rexi Content Ingested</h6>
+                        <div class="display-5 fw-bold count-primary" id="countA">0</div>
+                    </div>
+                </div>
+            </div>
+            <div class="col-md-4">
+                <div class="card h-100 border-success border-start border-2">
+                    <div class="card-body">
+                        <h6 class="card-subtitle mb-2 text-uppercase text-muted small">Sharepoint Content</h6>
+                        <div class="display-5 fw-bold count-success" id="countB">0</div>
+                    </div>
+                </div>
+            </div>
+            <div class="col-md-4">
+                <div class="card h-100 border-warning border-start border-2" id="diffCard">
+                    <div class="card-body">
+                        <h6 class="card-subtitle mb-2 text-uppercase text-muted small">Differences Found</h6>
+                        <div class="display-5 fw-bold count-warning" id="diffCount">0</div>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Controls -->
+        <div class="card mb-4">
+            <div class="card-body">
+                <div class="d-flex flex-wrap align-items-center gap-3">
+                    <div class="d-flex align-items-center gap-2">
+                        <label for="filterSelect" class="form-label mb-0 fw-medium">Filter:</label>
+                        <select id="filterSelect" class="form-select form-select-sm" style="width: auto;" onchange="applyFilter()">
+                            <option value="all">All Files</option>
+                            <option value="different">Different Content</option>
+                            <option value="missing">Missing in Other</option>
+                            <option value="identical">Identical</option>
+                        </select>
+                    </div>
+                    <input type="text" id="searchInput" class="form-control form-control-sm" style="width: 200px;" placeholder="Search filenames..." oninput="applyFilter()">
+                    <div class="btn-group btn-group-sm">
+                        <button class="btn btn-outline-secondary" onclick="prevDiff()">← Prev Diff</button>
+                        <button class="btn btn-outline-secondary" onclick="nextDiff()">Next Diff →</button>
+                    </div>
+                    <button class="btn btn-primary btn-sm" onclick="highlightAllDiffs()">Highlight All Differences</button>
+                    <button class="btn btn-outline-secondary btn-sm" onclick="clearFilters()">Clear Filters</button>
+                </div>
+            </div>
+        </div>
+
+        <!-- File Comparison Panels -->
+        <div class="row g-3 mb-3">
+            <div class="col-md-6">
+                <div class="card h-100">
+                    <div class="card-header bg-primary-subtle border-start border-2 border-primary d-flex justify-content-between align-items-center">
+                        <h5 class="mb-0">Rexi Content Ingested</h5>
+                        <span class="badge bg-primary" id="visibleCountA">0 files</span>
+                    </div>
+                    <div class="file-list" id="listA"></div>
+                </div>
+            </div>
+            <div class="col-md-6">
+                <div class="card h-100">
+                    <div class="card-header bg-success-subtle border-start border-2 border-success d-flex justify-content-between align-items-center">
+                        <h5 class="mb-0">Sharepoint Content</h5>
+                        <span class="badge bg-success" id="visibleCountB">0 files</span>
+                    </div>
+                    <div class="file-list" id="listB"></div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Legend -->
+        <div class="card mb-4">
+            <div class="card-body py-2">
+                <div class="d-flex flex-wrap gap-4 small">
+                    <div class="d-flex align-items-center gap-2"><div class="legend-color identical"></div> Identical</div>
+                    <div class="d-flex align-items-center gap-2"><div class="legend-color different"></div> Different Content</div>
+                    <div class="d-flex align-items-center gap-2"><div class="legend-color missing"></div> Missing in Other Bucket</div>
+                    <div class="d-flex align-items-center gap-2"><div class="legend-color only-here"></div> Only in This Bucket</div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Content Diff Panel -->
+        <div class="card" id="diffPanel" style="display: none;">
+            <div class="card-header bg-light">
+                <div class="d-flex flex-wrap justify-content-between align-items-center gap-3">
+                    <div>
+                        <h5 class="mb-1">Content Comparison: <span id="diffFilename" class="text-primary"></span></h5>
+                        <span id="diffStatus"></span>
+                    </div>
+                    <div class="d-flex align-items-center gap-3" id="diffStatsContainer">
+                        <div class="d-flex gap-2" id="diffStats">
+                            <span class="badge bg-success-subtle text-success"><span id="addCount">0</span> additions</span>
+                            <span class="badge bg-danger-subtle text-danger"><span id="delCount">0</span> deletions</span>
+                            <span class="badge bg-warning-subtle text-warning"><span id="changeCount">0</span> changes</span>
+                        </div>
+                        <div class="btn-group btn-group-sm" id="diffNav">
+                            <button class="btn btn-outline-secondary" onclick="prevChange()">↑ Prev</button>
+                            <span class="btn btn-outline-secondary disabled"><span id="currentChange">0</span> / <span id="totalChanges">0</span></span>
+                            <button class="btn btn-outline-secondary" onclick="nextChange()">↓ Next</button>
+                        </div>
+                    </div>
+                </div>
+            </div>
+            <div class="diff-content">
+                <div class="diff-side side-a" id="diffContentA">
+                    <div class="diff-side-header side-a">Rexi Content (Original)</div>
+                    <div class="diff-lines" id="diffLinesA"></div>
+                </div>
+                <div class="diff-side side-b" id="diffContentB">
+                    <div class="diff-side-header side-b">Sharepoint Content (Updated)</div>
+                    <div class="diff-lines" id="diffLinesB"></div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        // Dummy data for buckets A and B
+        const bucketA = [
+            { filename: "document1.pdf", content: "This is the content of document 1.\nIt has multiple lines.\nSome information here.", url: "https://example.com/doc1.pdf" },
+            { filename: "report_2024.docx", content: `ANNUAL REPORT 2024
+=====================================
+
+EXECUTIVE SUMMARY
+-----------------
+This annual report presents a comprehensive overview of our organization's performance during the fiscal year 2024. Despite challenging market conditions, we have achieved significant milestones and maintained steady growth across all business segments.
+
+Our total revenue for 2024 reached $1.5 million, representing a 12% increase from the previous year. Operating expenses were carefully managed at $1.2 million, resulting in a net profit of $300,000. This performance demonstrates our commitment to operational efficiency and sustainable growth.
+
+FINANCIAL HIGHLIGHTS
+--------------------
+Revenue Breakdown:
+- Product Sales: $850,000 (57% of total revenue)
+- Service Revenue: $420,000 (28% of total revenue)
+- Licensing Fees: $230,000 (15% of total revenue)
+
+Operating Expenses:
+- Personnel Costs: $620,000
+- Marketing & Sales: $180,000
+- Research & Development: $150,000
+- Administrative Expenses: $120,000
+- Infrastructure & IT: $130,000
+
+Key Financial Ratios:
+- Gross Margin: 42%
+- Operating Margin: 20%
+- Return on Investment: 18%
+- Current Ratio: 2.1
+
+OPERATIONAL ACHIEVEMENTS
+------------------------
+1. Successfully launched 3 new product lines
+2. Expanded customer base by 25% year-over-year
+3. Reduced operational costs by 8% through process optimization
+4. Achieved 99.5% customer satisfaction rating
+5. Implemented new CRM system across all departments
+
+MARKET ANALYSIS
+---------------
+The market conditions in 2024 presented both challenges and opportunities. Key trends observed:
+
+- Increased demand for digital solutions (+35%)
+- Growing emphasis on sustainability and ESG compliance
+- Shift towards subscription-based business models
+- Rising competition from emerging market players
+- Regulatory changes impacting data privacy requirements
+
+Our competitive position remains strong with a market share of approximately 12% in our primary segment. We have successfully differentiated ourselves through superior customer service and innovative product offerings.
+
+HUMAN RESOURCES
+---------------
+Employee Statistics:
+- Total Employees: 145
+- New Hires: 28
+- Employee Retention Rate: 92%
+- Average Training Hours per Employee: 40
+
+We continued to invest in our workforce development programs, including:
+- Leadership development initiatives
+- Technical skills training
+- Diversity and inclusion programs
+- Employee wellness initiatives
+
+TECHNOLOGY & INNOVATION
+-----------------------
+R&D investments totaled $150,000 this year, focusing on:
+- Cloud infrastructure modernization
+- AI/ML capabilities development
+- Mobile application enhancements
+- Security improvements and compliance
+
+Patent applications filed: 3
+Products in development pipeline: 5
+
+SUSTAINABILITY INITIATIVES
+--------------------------
+Environmental Impact:
+- Carbon footprint reduced by 15%
+- Paper usage decreased by 40%
+- Energy consumption optimized by 12%
+
+Community Engagement:
+- Charitable donations: $25,000
+- Employee volunteer hours: 500
+- Local partnerships established: 8
+
+RISK MANAGEMENT
+---------------
+Key risks identified and mitigation strategies implemented:
+1. Cybersecurity threats - Enhanced security protocols
+2. Supply chain disruptions - Diversified supplier base
+3. Regulatory compliance - Dedicated compliance team
+4. Market volatility - Hedging strategies employed
+
+OUTLOOK FOR 2025
+----------------
+Strategic priorities for the upcoming year:
+- Expand into 2 new geographic markets
+- Launch next-generation product platform
+- Achieve 20% revenue growth target
+- Continue cost optimization initiatives
+- Strengthen strategic partnerships
+
+We remain optimistic about our growth prospects and are well-positioned to capitalize on emerging opportunities in our industry.
+
+BOARD OF DIRECTORS
+------------------
+- John Smith, Chairman
+- Jane Doe, CEO
+- Robert Johnson, CFO
+- Sarah Williams, COO
+- Michael Brown, CTO
+
+ACKNOWLEDGMENTS
+---------------
+We extend our sincere gratitude to our employees, customers, partners, and shareholders for their continued support and trust in our organization.
+
+For more information, please contact:
+Investor Relations: investors@company.com
+Media Inquiries: press@company.com
+
+© 2024 Company Name. All rights reserved.`, url: "https://example.com/report_2024.docx" },
+            { filename: "config.json", content: '{"setting1": "value1", "setting2": "value2", "debug": false}', url: "https://example.com/config.json" },
+            { filename: "readme.txt", content: "Welcome to the project!\n\nThis readme contains important information.\n\nSetup instructions:\n1. Install dependencies\n2. Run the app", url: "https://example.com/readme.txt" },
+            { filename: "data_export.csv", content: "id,name,value\n1,Item A,100\n2,Item B,200\n3,Item C,300", url: "https://example.com/data_export.csv" },
+            { filename: "old_file.txt", content: "This file only exists in bucket A.", url: "https://example.com/old_file.txt" },
+        ];
+
+        const bucketB = [
+            { filename: "document1.pdf", content: "This is the content of document 1.\nIt has multiple lines.\nSome information here.", url: "https://storage.example.com/doc1.pdf" },
+            { filename: "report_2024.docx", content: `ANNUAL REPORT 2024 - REVISED
+=====================================
+
+EXECUTIVE SUMMARY
+-----------------
+This annual report presents a comprehensive overview of our organization's outstanding performance during the fiscal year 2024. Despite challenging market conditions, we have achieved remarkable milestones and exceeded growth targets across all business segments.
+
+Our total revenue for 2024 reached $1.8 million, representing a 18% increase from the previous year. Operating expenses were strategically managed at $1.3 million, resulting in a net profit of $500,000. This exceptional performance demonstrates our commitment to operational excellence and aggressive growth.
+
+FINANCIAL HIGHLIGHTS
+--------------------
+Revenue Breakdown:
+- Product Sales: $980,000 (54% of total revenue)
+- Service Revenue: $520,000 (29% of total revenue)
+- Licensing Fees: $300,000 (17% of total revenue)
+
+Operating Expenses:
+- Personnel Costs: $680,000
+- Marketing & Sales: $220,000
+- Research & Development: $180,000
+- Administrative Expenses: $100,000
+- Infrastructure & IT: $120,000
+
+Key Financial Ratios:
+- Gross Margin: 48%
+- Operating Margin: 28%
+- Return on Investment: 24%
+- Current Ratio: 2.5
+
+OPERATIONAL ACHIEVEMENTS
+------------------------
+1. Successfully launched 5 new product lines
+2. Expanded customer base by 35% year-over-year
+3. Reduced operational costs by 12% through process optimization
+4. Achieved 99.8% customer satisfaction rating
+5. Implemented new CRM system across all departments
+6. Opened 2 new regional offices
+7. Established strategic partnership with industry leader
+
+MARKET ANALYSIS
+---------------
+The market conditions in 2024 presented significant opportunities for growth. Key trends observed:
+
+- Increased demand for digital solutions (+45%)
+- Growing emphasis on sustainability and ESG compliance
+- Accelerated shift towards subscription-based business models
+- Market consolidation creating acquisition opportunities
+- Favorable regulatory changes in key markets
+
+Our competitive position has strengthened significantly with a market share of approximately 15% in our primary segment. We have successfully differentiated ourselves through superior customer service, innovative product offerings, and strategic acquisitions.
+
+HUMAN RESOURCES
+---------------
+Employee Statistics:
+- Total Employees: 178
+- New Hires: 45
+- Employee Retention Rate: 94%
+- Average Training Hours per Employee: 52
+
+We significantly expanded our workforce development programs, including:
+- Executive leadership academy
+- Technical certification programs
+- Comprehensive diversity and inclusion initiatives
+- Enhanced employee wellness and mental health programs
+- Remote work infrastructure improvements
+
+TECHNOLOGY & INNOVATION
+-----------------------
+R&D investments totaled $180,000 this year, focusing on:
+- Cloud-native infrastructure transformation
+- Advanced AI/ML capabilities and automation
+- Next-generation mobile applications
+- Zero-trust security architecture
+- IoT integration capabilities
+
+Patent applications filed: 7
+Products in development pipeline: 8
+Technology partnerships established: 4
+
+SUSTAINABILITY INITIATIVES
+--------------------------
+Environmental Impact:
+- Carbon footprint reduced by 25%
+- Paper usage decreased by 60%
+- Energy consumption optimized by 20%
+- Achieved carbon neutral certification
+
+Community Engagement:
+- Charitable donations: $50,000
+- Employee volunteer hours: 1,200
+- Local partnerships established: 15
+- Educational scholarships awarded: 10
+
+RISK MANAGEMENT
+---------------
+Key risks identified and mitigation strategies implemented:
+1. Cybersecurity threats - Zero-trust security model deployed
+2. Supply chain disruptions - Regional supplier networks established
+3. Regulatory compliance - AI-powered compliance monitoring
+4. Market volatility - Dynamic hedging strategies
+5. Talent acquisition - Enhanced employer branding initiatives
+
+OUTLOOK FOR 2025
+----------------
+Strategic priorities for the upcoming year:
+- Expand into 4 new geographic markets
+- Launch revolutionary product platform
+- Achieve 30% revenue growth target
+- Pursue strategic acquisition opportunities
+- Establish industry consortium leadership
+- Complete digital transformation initiative
+
+We are extremely optimistic about our growth prospects and are exceptionally well-positioned to dominate emerging opportunities in our industry.
+
+BOARD OF DIRECTORS
+------------------
+- John Smith, Chairman
+- Jane Doe, CEO
+- Robert Johnson, CFO
+- Sarah Williams, COO
+- Michael Brown, CTO
+- Emily Davis, Chief Strategy Officer (New)
+- David Wilson, Chief Digital Officer (New)
+
+ACKNOWLEDGMENTS
+---------------
+We extend our deepest gratitude to our dedicated employees, valued customers, strategic partners, and loyal shareholders for their unwavering support and confidence in our organization's vision.
+
+For more information, please contact:
+Investor Relations: investors@company.com
+Media Inquiries: press@company.com
+Strategic Partnerships: partnerships@company.com
+
+© 2024 Company Name. All rights reserved.
+Document Version: 2.1 - Final`, url: "https://storage.example.com/report_2024.docx" },
+            { filename: "config.json", content: '{"setting1": "value1", "setting2": "newvalue", "debug": true, "newSetting": "added"}', url: "https://storage.example.com/config.json" },
+            { filename: "readme.txt", content: "Welcome to the project!\n\nThis readme contains important information.\n\nSetup instructions:\n1. Install dependencies\n2. Run the app", url: "https://storage.example.com/readme.txt" },
+            { filename: "data_export.csv", content: "id,name,value\n1,Item A,100\n2,Item B,250\n3,Item C,300\n4,Item D,400", url: "https://storage.example.com/data_export.csv" },
+            { filename: "new_file.txt", content: "This file only exists in bucket B.", url: "https://storage.example.com/new_file.txt" },
+            { filename: "another_new.pdf", content: "Another file that is only in bucket B.", url: "https://storage.example.com/another_new.pdf" },
+        ];
+
+        // Comparison state
+        let comparisonData = [];
+        let currentDiffIndex = -1;
+        let selectedFile = null;
+
+        // Initialize comparison
+        function initComparison() {
+            const allFilenames = new Set([
+                ...bucketA.map(f => f.filename),
+                ...bucketB.map(f => f.filename)
+            ]);
+
+            comparisonData = [];
+
+            allFilenames.forEach(filename => {
+                const fileA = bucketA.find(f => f.filename === filename);
+                const fileB = bucketB.find(f => f.filename === filename);
+
+                let status;
+                if (fileA && fileB) {
+                    status = fileA.content === fileB.content ? 'identical' : 'different';
+                } else if (fileA) {
+                    status = 'only-a';
+                } else {
+                    status = 'only-b';
+                }
+
+                comparisonData.push({
+                    filename,
+                    fileA,
+                    fileB,
+                    status
+                });
+            });
+
+            // Sort: differences first, then alphabetically
+            comparisonData.sort((a, b) => {
+                const statusOrder = { 'different': 0, 'only-a': 1, 'only-b': 1, 'identical': 2 };
+                if (statusOrder[a.status] !== statusOrder[b.status]) {
+                    return statusOrder[a.status] - statusOrder[b.status];
+                }
+                return a.filename.localeCompare(b.filename);
+            });
+
+            updateSummary();
+            renderLists();
+        }
+
+        // Update summary cards
+        function updateSummary() {
+            document.getElementById('countA').textContent = bucketA.length;
+            document.getElementById('countB').textContent = bucketB.length;
+
+            const diffCount = comparisonData.filter(d => d.status !== 'identical').length;
+            document.getElementById('diffCount').textContent = diffCount;
+
+            const diffCard = document.getElementById('diffCard');
+            if (diffCount === 0) {
+                diffCard.classList.add('no-diff');
+            } else {
+                diffCard.classList.remove('no-diff');
+            }
+        }
+
+        // Render file lists
+        function renderLists() {
+            const filter = document.getElementById('filterSelect').value;
+            const search = document.getElementById('searchInput').value.toLowerCase();
+
+            let filteredData = comparisonData.filter(item => {
+                // Apply filter
+                if (filter === 'different' && item.status !== 'different') return false;
+                if (filter === 'missing' && item.status !== 'only-a' && item.status !== 'only-b') return false;
+                if (filter === 'identical' && item.status !== 'identical') return false;
+
+                // Apply search
+                if (search && !item.filename.toLowerCase().includes(search)) return false;
+
+                return true;
+            });
+
+            const listA = document.getElementById('listA');
+            const listB = document.getElementById('listB');
+            listA.innerHTML = '';
+            listB.innerHTML = '';
+
+            let visibleA = 0, visibleB = 0;
+
+            filteredData.forEach((item, index) => {
+                // Bucket A item
+                const itemA = document.createElement('div');
+                itemA.className = 'file-item';
+                itemA.dataset.index = index;
+
+                if (item.fileA) {
+                    visibleA++;
+                    itemA.classList.add(item.status === 'identical' ? 'identical' : (item.status === 'different' ? 'different' : 'only-here'));
+                    itemA.innerHTML = `
+                        <div class="fw-medium text-dark mb-1">${item.filename}${getStatusBadge(item.status, 'a')}</div>
+                        <div class="small text-muted">${item.fileA.url}</div>
+                    `;
+                    itemA.onclick = () => selectFile(item, index);
+                } else {
+                    itemA.classList.add('missing');
+                    itemA.innerHTML = `
+                        <div class="fw-medium text-dark mb-1">${item.filename}<span class="badge bg-danger-subtle text-danger ms-2">Missing</span></div>
+                        <div class="small text-muted">Not found in Rexi Content</div>
+                    `;
+                    itemA.onclick = () => selectFile(item, index);
+                }
+                listA.appendChild(itemA);
+
+                // Bucket B item
+                const itemB = document.createElement('div');
+                itemB.className = 'file-item';
+                itemB.dataset.index = index;
+
+                if (item.fileB) {
+                    visibleB++;
+                    itemB.classList.add(item.status === 'identical' ? 'identical' : (item.status === 'different' ? 'different' : 'only-here'));
+                    itemB.innerHTML = `
+                        <div class="fw-medium text-dark mb-1">${item.filename}${getStatusBadge(item.status, 'b')}</div>
+                        <div class="small text-muted">${item.fileB.url}</div>
+                    `;
+                    itemB.onclick = () => selectFile(item, index);
+                } else {
+                    itemB.classList.add('missing');
+                    itemB.innerHTML = `
+                        <div class="fw-medium text-dark mb-1">${item.filename}<span class="badge bg-danger-subtle text-danger ms-2">Missing</span></div>
+                        <div class="small text-muted">Not found in Sharepoint Content</div>
+                    `;
+                    itemB.onclick = () => selectFile(item, index);
+                }
+                listB.appendChild(itemB);
+            });
+
+            document.getElementById('visibleCountA').textContent = `${visibleA} files`;
+            document.getElementById('visibleCountB').textContent = `${visibleB} files`;
+        }
+
+        // Get status badge HTML
+        function getStatusBadge(status, side) {
+            switch (status) {
+                case 'identical':
+                    return '<span class="badge bg-success-subtle text-success ms-2">Identical</span>';
+                case 'different':
+                    return '<span class="badge bg-warning-subtle text-warning ms-2">Different</span>';
+                case 'only-a':
+                    return side === 'a' ? '<span class="badge bg-primary-subtle text-primary ms-2">Only Here</span>' : '';
+                case 'only-b':
+                    return side === 'b' ? '<span class="badge bg-primary-subtle text-primary ms-2">Only Here</span>' : '';
+                default:
+                    return '';
+            }
+        }
+
+        // Track current change for navigation
+        let changePositions = [];
+        let currentChangeIndex = -1;
+
+        // Select a file and show diff
+        function selectFile(item, index) {
+            selectedFile = item;
+            currentDiffIndex = index;
+            changePositions = [];
+            currentChangeIndex = -1;
+
+            // Update selection styling
+            document.querySelectorAll('.file-item').forEach(el => el.classList.remove('selected'));
+            document.querySelectorAll(`.file-item[data-index="${index}"]`).forEach(el => el.classList.add('selected'));
+
+            // Show diff panel
+            const diffPanel = document.getElementById('diffPanel');
+            diffPanel.style.display = 'block';
+
+            document.getElementById('diffFilename').textContent = item.filename;
+
+            const linesA = document.getElementById('diffLinesA');
+            const linesB = document.getElementById('diffLinesB');
+            const diffStatsContainer = document.getElementById('diffStatsContainer');
+
+            if (item.fileA && item.fileB) {
+                // Both exist - show diff with stats
+                const diffResult = computeDiff(item.fileA.content, item.fileB.content);
+                linesA.innerHTML = diffResult.htmlA;
+                linesB.innerHTML = diffResult.htmlB;
+
+                // Update stats
+                document.getElementById('addCount').textContent = diffResult.stats.additions;
+                document.getElementById('delCount').textContent = diffResult.stats.deletions;
+                document.getElementById('changeCount').textContent = diffResult.stats.changes;
+                document.getElementById('totalChanges').textContent = diffResult.stats.total;
+                document.getElementById('currentChange').textContent = diffResult.stats.total > 0 ? '1' : '0';
+                diffStatsContainer.style.display = 'flex';
+
+                // Store change positions for navigation
+                changePositions = diffResult.changePositions;
+                if (changePositions.length > 0) {
+                    currentChangeIndex = 0;
+                }
+
+                document.getElementById('diffStatus').innerHTML = item.status === 'identical'
+                    ? '<span class="badge bg-success">Identical</span>'
+                    : '<span class="badge bg-warning text-dark">Content Differs</span>';
+            } else if (item.fileA) {
+                // Only in A - no stats to show
+                linesA.innerHTML = formatSingleContent(item.fileA.content, 'removed');
+                linesB.innerHTML = '<div class="diff-placeholder">File does not exist in Sharepoint Content</div>';
+                diffStatsContainer.style.display = 'none';
+                document.getElementById('diffStatus').innerHTML = '<span class="badge bg-primary">Only in Rexi Content</span>';
+            } else {
+                // Only in B - no stats to show
+                linesA.innerHTML = '<div class="diff-placeholder">File does not exist in Rexi Content</div>';
+                linesB.innerHTML = formatSingleContent(item.fileB.content, 'added');
+                diffStatsContainer.style.display = 'none';
+                document.getElementById('diffStatus').innerHTML = '<span class="badge bg-primary">Only in Sharepoint Content</span>';
+            }
+
+            // Scroll diff panel into view
+            diffPanel.scrollIntoView({ behavior: 'smooth', block: 'start' });
+        }
+
+        // Format single file content with line numbers
+        function formatSingleContent(content, type) {
+            const lines = content.split('\n');
+            let html = '';
+            lines.forEach((line, i) => {
+                html += `<div class="diff-line ${type}" data-line="${i + 1}">`;
+                html += `<span class="line-number">${i + 1}</span>`;
+                html += `<span class="line-content">${escapeHtml(line) || '&nbsp;'}</span>`;
+                html += '</div>';
+            });
+            return html;
+        }
+
+        // Enhanced line-by-line diff with stats and navigation support
+        function computeDiff(textA, textB) {
+            const linesA = textA.split('\n');
+            const linesB = textB.split('\n');
+
+            let htmlA = '';
+            let htmlB = '';
+
+            // Statistics
+            let additions = 0;
+            let deletions = 0;
+            let changes = 0;
+            const changePositions = [];
+
+            const maxLines = Math.max(linesA.length, linesB.length);
+
+            for (let i = 0; i < maxLines; i++) {
+                const lineA = linesA[i];
+                const lineB = linesB[i];
+                const lineNum = i + 1;
+
+                if (lineA === undefined) {
+                    // Line added in B
+                    additions++;
+                    changePositions.push({ line: lineNum, type: 'addition' });
+                    htmlA += `<div class="diff-line removed" data-line="${lineNum}" data-change-index="${changePositions.length - 1}">`;
+                    htmlA += `<span class="line-number">${lineNum}</span>`;
+                    htmlA += `<span class="line-content">&nbsp;</span>`;
+                    htmlA += '</div>';
+
+                    htmlB += `<div class="diff-line added" data-line="${lineNum}" data-change-index="${changePositions.length - 1}">`;
+                    htmlB += `<span class="line-number">${lineNum}</span>`;
+                    htmlB += `<span class="line-content">${escapeHtml(lineB)}</span>`;
+                    htmlB += '</div>';
+                } else if (lineB === undefined) {
+                    // Line deleted from A
+                    deletions++;
+                    changePositions.push({ line: lineNum, type: 'deletion' });
+                    htmlA += `<div class="diff-line removed" data-line="${lineNum}" data-change-index="${changePositions.length - 1}">`;
+                    htmlA += `<span class="line-number">${lineNum}</span>`;
+                    htmlA += `<span class="line-content">${escapeHtml(lineA)}</span>`;
+                    htmlA += '</div>';
+
+                    htmlB += `<div class="diff-line added" data-line="${lineNum}" data-change-index="${changePositions.length - 1}">`;
+                    htmlB += `<span class="line-number">${lineNum}</span>`;
+                    htmlB += `<span class="line-content">&nbsp;</span>`;
+                    htmlB += '</div>';
+                } else if (lineA !== lineB) {
+                    // Line changed
+                    changes++;
+                    changePositions.push({ line: lineNum, type: 'change' });
+
+                    // Highlight inline differences
+                    const { highlightedA, highlightedB } = highlightInlineDiff(lineA, lineB);
+
+                    htmlA += `<div class="diff-line changed" data-line="${lineNum}" data-change-index="${changePositions.length - 1}">`;
+                    htmlA += `<span class="line-number">${lineNum}</span>`;
+                    htmlA += `<span class="line-content">${highlightedA}</span>`;
+                    htmlA += '</div>';
+
+                    htmlB += `<div class="diff-line changed" data-line="${lineNum}" data-change-index="${changePositions.length - 1}">`;
+                    htmlB += `<span class="line-number">${lineNum}</span>`;
+                    htmlB += `<span class="line-content">${highlightedB}</span>`;
+                    htmlB += '</div>';
+                } else {
+                    // Lines are identical
+                    htmlA += `<div class="diff-line" data-line="${lineNum}">`;
+                    htmlA += `<span class="line-number">${lineNum}</span>`;
+                    htmlA += `<span class="line-content">${escapeHtml(lineA) || '&nbsp;'}</span>`;
+                    htmlA += '</div>';
+
+                    htmlB += `<div class="diff-line" data-line="${lineNum}">`;
+                    htmlB += `<span class="line-number">${lineNum}</span>`;
+                    htmlB += `<span class="line-content">${escapeHtml(lineB) || '&nbsp;'}</span>`;
+                    htmlB += '</div>';
+                }
+            }
+
+            return {
+                htmlA,
+                htmlB,
+                stats: {
+                    additions,
+                    deletions,
+                    changes,
+                    total: additions + deletions + changes
+                },
+                changePositions
+            };
+        }
+
+        // Highlight inline differences between two lines
+        function highlightInlineDiff(lineA, lineB) {
+            // Simple word-level diff
+            const wordsA = lineA.split(/(\s+)/);
+            const wordsB = lineB.split(/(\s+)/);
+
+            let highlightedA = '';
+            let highlightedB = '';
+
+            const maxWords = Math.max(wordsA.length, wordsB.length);
+
+            for (let i = 0; i < maxWords; i++) {
+                const wordA = wordsA[i] || '';
+                const wordB = wordsB[i] || '';
+
+                if (wordA !== wordB) {
+                    if (wordA) {
+                        highlightedA += `<span class="highlight-change">${escapeHtml(wordA)}</span>`;
+                    }
+                    if (wordB) {
+                        highlightedB += `<span class="highlight-change">${escapeHtml(wordB)}</span>`;
+                    }
+                } else {
+                    highlightedA += escapeHtml(wordA);
+                    highlightedB += escapeHtml(wordB);
+                }
+            }
+
+            return { highlightedA: highlightedA || '&nbsp;', highlightedB: highlightedB || '&nbsp;' };
+        }
+
+        // Navigate to next change in diff
+        function nextChange() {
+            if (changePositions.length === 0) return;
+
+            currentChangeIndex = (currentChangeIndex + 1) % changePositions.length;
+            scrollToChange(currentChangeIndex);
+        }
+
+        // Navigate to previous change in diff
+        function prevChange() {
+            if (changePositions.length === 0) return;
+
+            currentChangeIndex = currentChangeIndex <= 0 ? changePositions.length - 1 : currentChangeIndex - 1;
+            scrollToChange(currentChangeIndex);
+        }
+
+        // Scroll to a specific change
+        function scrollToChange(index) {
+            document.getElementById('currentChange').textContent = index + 1;
+
+            // Find the elements with this change index
+            const elementsA = document.querySelectorAll(`#diffLinesA .diff-line[data-change-index="${index}"]`);
+            const elementsB = document.querySelectorAll(`#diffLinesB .diff-line[data-change-index="${index}"]`);
+
+            // Remove previous highlight
+            document.querySelectorAll('.diff-line.current-change').forEach(el => {
+                el.classList.remove('current-change');
+            });
+
+            // Add highlight to current change
+            elementsA.forEach(el => el.classList.add('current-change'));
+            elementsB.forEach(el => el.classList.add('current-change'));
+
+            // Scroll both sides to the change
+            if (elementsA.length > 0) {
+                elementsA[0].scrollIntoView({ behavior: 'smooth', block: 'center' });
+            }
+            if (elementsB.length > 0) {
+                const sideB = document.getElementById('diffContentB');
+                const elementTop = elementsB[0].offsetTop;
+                sideB.scrollTop = elementTop - sideB.clientHeight / 2;
+            }
+        }
+
+        // Escape HTML
+        function escapeHtml(text) {
+            const div = document.createElement('div');
+            div.textContent = text;
+            return div.innerHTML;
+        }
+
+        // Filter handling
+        function applyFilter() {
+            renderLists();
+            // Clear selection
+            document.getElementById('diffPanel').style.display = 'none';
+            selectedFile = null;
+        }
+
+        // Clear all filters and show all content
+        function clearFilters() {
+            // Reset filter dropdown to "All Files"
+            document.getElementById('filterSelect').value = 'all';
+            // Clear search input
+            document.getElementById('searchInput').value = '';
+            // Re-render lists with no filters
+            renderLists();
+            // Hide diff panel
+            document.getElementById('diffPanel').style.display = 'none';
+            selectedFile = null;
+            currentDiffIndex = -1;
+        }
+
+        // Navigate to next difference
+        function nextDiff() {
+            const diffItems = comparisonData
+                .map((item, index) => ({ item, index }))
+                .filter(({ item }) => item.status !== 'identical');
+
+            if (diffItems.length === 0) return;
+
+            let nextIndex = 0;
+            if (currentDiffIndex >= 0) {
+                const currentPos = diffItems.findIndex(d => d.index === currentDiffIndex);
+                nextIndex = (currentPos + 1) % diffItems.length;
+            }
+
+            const next = diffItems[nextIndex];
+            selectFile(next.item, next.index);
+        }
+
+        // Navigate to previous difference
+        function prevDiff() {
+            const diffItems = comparisonData
+                .map((item, index) => ({ item, index }))
+                .filter(({ item }) => item.status !== 'identical');
+
+            if (diffItems.length === 0) return;
+
+            let prevIndex = diffItems.length - 1;
+            if (currentDiffIndex >= 0) {
+                const currentPos = diffItems.findIndex(d => d.index === currentDiffIndex);
+                prevIndex = currentPos <= 0 ? diffItems.length - 1 : currentPos - 1;
+            }
+
+            const prev = diffItems[prevIndex];
+            selectFile(prev.item, prev.index);
+        }
+
+        // Highlight all differences
+        function highlightAllDiffs() {
+            // Clear the filter dropdown and search, then manually filter to non-identical
+            document.getElementById('filterSelect').value = 'all';
+            document.getElementById('searchInput').value = '';
+
+            // Render only non-identical items
+            const listA = document.getElementById('listA');
+            const listB = document.getElementById('listB');
+            listA.innerHTML = '';
+            listB.innerHTML = '';
+
+            // Filter to only non-identical items
+            const nonIdenticalData = comparisonData.filter(item => item.status !== 'identical');
+
+            let visibleA = 0, visibleB = 0;
+
+            nonIdenticalData.forEach((item, index) => {
+                // Find the original index in comparisonData for selection tracking
+                const originalIndex = comparisonData.findIndex(d => d.filename === item.filename);
+
+                // Bucket A item
+                const itemA = document.createElement('div');
+                itemA.className = 'file-item';
+                itemA.dataset.index = originalIndex;
+
+                if (item.fileA) {
+                    visibleA++;
+                    itemA.classList.add(item.status === 'different' ? 'different' : 'only-here');
+                    itemA.innerHTML = `
+                        <div class="fw-medium text-dark mb-1">${item.filename}${getStatusBadge(item.status, 'a')}</div>
+                        <div class="small text-muted">${item.fileA.url}</div>
+                    `;
+                    itemA.onclick = () => selectFile(item, originalIndex);
+                } else {
+                    itemA.classList.add('missing');
+                    itemA.innerHTML = `
+                        <div class="fw-medium text-dark mb-1">${item.filename}<span class="badge bg-danger-subtle text-danger ms-2">Missing</span></div>
+                        <div class="small text-muted">Not found in Rexi Content</div>
+                    `;
+                    itemA.onclick = () => selectFile(item, originalIndex);
+                }
+                listA.appendChild(itemA);
+
+                // Bucket B item
+                const itemB = document.createElement('div');
+                itemB.className = 'file-item';
+                itemB.dataset.index = originalIndex;
+
+                if (item.fileB) {
+                    visibleB++;
+                    itemB.classList.add(item.status === 'different' ? 'different' : 'only-here');
+                    itemB.innerHTML = `
+                        <div class="fw-medium text-dark mb-1">${item.filename}${getStatusBadge(item.status, 'b')}</div>
+                        <div class="small text-muted">${item.fileB.url}</div>
+                    `;
+                    itemB.onclick = () => selectFile(item, originalIndex);
+                } else {
+                    itemB.classList.add('missing');
+                    itemB.innerHTML = `
+                        <div class="fw-medium text-dark mb-1">${item.filename}<span class="badge bg-danger-subtle text-danger ms-2">Missing</span></div>
+                        <div class="small text-muted">Not found in Sharepoint Content</div>
+                    `;
+                    itemB.onclick = () => selectFile(item, originalIndex);
+                }
+                listB.appendChild(itemB);
+            });
+
+            document.getElementById('visibleCountA').textContent = `${visibleA} files`;
+            document.getElementById('visibleCountB').textContent = `${visibleB} files`;
+
+            // Flash animation on all displayed items
+            document.querySelectorAll('.file-item').forEach(el => {
+                el.style.transition = 'background 0.3s';
+                el.style.background = '#ffeb3b';
+                setTimeout(() => {
+                    el.style.background = '';
+                }, 500);
+            });
+
+            // Auto-select first difference
+            if (nonIdenticalData.length > 0) {
+                const firstItem = nonIdenticalData[0];
+                const firstIndex = comparisonData.findIndex(d => d.filename === firstItem.filename);
+                selectFile(firstItem, firstIndex);
+            }
+        }
+
+        // Initialize on page load
+        document.addEventListener('DOMContentLoaded', initComparison);
+    </script>
+</body>
+</html>
+
