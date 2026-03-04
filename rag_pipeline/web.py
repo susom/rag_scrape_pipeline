@@ -1188,7 +1188,7 @@ async def ingest_batch(
     force_reprocess: bool = False,
     document_ids: str = None,
     dry_run: bool = False,
-    days_back: int = 7,
+    days_back: int = 1,  # 24 hours
     db: Session = Depends(get_db),
 ):
     """

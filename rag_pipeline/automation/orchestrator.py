@@ -17,7 +17,13 @@ from dataclasses import dataclass, asdict
 from sqlalchemy.orm import Session
 
 from rag_pipeline.database.models import DocumentIngestionState
-from rag_pipeline.automation.content_fetcher import fetch_content_sources, fetch_content_sources_stub
+from rag_pipeline.automation.content_fetcher import (
+    fetch_content_sources,
+    fetch_content_sources_stub,
+    SharePointPage,
+    get_page_content,
+    update_tracker_list,
+)
 from rag_pipeline.sharepoint import SharePointGraphClient, SharePointItem, get_site_config
 from rag_pipeline.automation.rag_client import store_document, delete_document
 from rag_pipeline.automation.locking import DistributedLock, LockAlreadyHeld
@@ -193,12 +199,12 @@ class IngestionOrchestrator:
                 documents_failed=0,
             )
 
-    def _fetch_content(self, modified_since: Optional[datetime] = None) -> Tuple[List[SharePointItem], List[str]]:
+    def _fetch_content(self, modified_since: Optional[datetime] = None) -> Tuple[List[SharePointPage], List[str]]:
         """Fetch content from all sources.
         
         Args:
-            modified_since: Optional datetime to filter SharePoint files by modification date.
-                          Files modified before this time are excluded (except external-urls.txt).
+            modified_since: Optional datetime to filter SharePoint pages by modification date.
+                          Pages modified before this time are excluded (except external URLs page).
         """
         try:
             return fetch_content_sources(modified_since=modified_since)
@@ -212,7 +218,7 @@ class IngestionOrchestrator:
 
     def _detect_changes(
         self,
-        sharepoint_items: List[SharePointItem],
+        sharepoint_pages: List[SharePointPage],
         external_urls: List[str],
         force_reprocess: bool = False,
         filter_ids: Optional[List[str]] = None,
@@ -220,8 +226,8 @@ class IngestionOrchestrator:
         """
         Detect changed/new documents.
 
-        For SharePoint files: uses lastModifiedDateTime from Graph API manifest —
-        if the file was modified after our last processing, queue it. No download
+        For SharePoint pages: uses lastModifiedDateTime from Graph API —
+        if the page was modified after our last processing, queue it. No download
         or hashing needed; the Graph API timestamp is authoritative.
 
         For external URLs: scrapes page → hashes text → compares to DB.
@@ -229,13 +235,13 @@ class IngestionOrchestrator:
         """
         documents_to_process = []
 
-        # --- SharePoint files ---
-        # The manifest is already date-filtered by Graph API — every item returned
-        # was modified within the requested window. Process them all; no DB check needed.
-        for sp_item in sharepoint_items:
+        # --- SharePoint pages ---
+        # The pages are already date-filtered by content_fetcher — every page returned
+        # was published and modified within the requested window. Process them all; no DB check needed.
+        for sp_page in sharepoint_pages:
             document_id = DocumentIngestionState.generate_document_id(
-                title=sp_item.name,
-                url=sp_item.url,
+                title=sp_page.title or sp_page.name,
+                url=sp_page.url,
             )
 
             if filter_ids and document_id not in filter_ids:
@@ -243,11 +249,11 @@ class IngestionOrchestrator:
 
             documents_to_process.append({
                 "document_id": document_id,
-                "source_type": "sharepoint",
-                "source_uri": sp_item.url,
-                "file_name": sp_item.name,
-                "download_url": sp_item.download_url,
-                "date_modified": sp_item.last_modified,
+                "source_type": "sharepoint_page",
+                "source_uri": sp_page.url,
+                "page_title": sp_page.title,
+                "page_id": sp_page.page_id,
+                "date_modified": sp_page.last_modified,
             })
             self._update_last_seen(document_id)
 
@@ -365,14 +371,14 @@ class IngestionOrchestrator:
         run_id = f"ingest_{datetime.now(timezone.utc).strftime('%Y-%m-%dT%H-%M-%SZ')}"
         start_time = datetime.now(timezone.utc)
 
-        sp_docs = [d for d in documents_to_process if d["source_type"] == "sharepoint"]
+        sp_docs = [d for d in documents_to_process if d["source_type"] == "sharepoint_page"]
         url_docs = [d for d in documents_to_process if d["source_type"] == "url"]
 
         all_documents = []
 
-        # --- Path A: SharePoint files (local processing) ---
+        # --- Path A: SharePoint pages (site pages) ---
         if sp_docs:
-            sp_documents = self._process_sharepoint_files(sp_docs)
+            sp_documents = self._process_sharepoint_pages(sp_docs)
             all_documents.extend(sp_documents)
 
         # --- Path B: External URLs (run_pipeline) ---
@@ -495,6 +501,98 @@ class IngestionOrchestrator:
                 documents.append({
                     "uri": doc["source_uri"],
                     "source_type": "sharepoint",
+                    "cached_files": {},
+                    "followed_from": None,
+                    "sections": [],
+                    "errors": [f"Processing failed: {e}"],
+                })
+
+        return documents
+
+    def _process_sharepoint_pages(self, sp_docs: List[Dict]) -> List[Dict]:
+        """
+        Process SharePoint site pages: get content via Graph API → sliding window AI.
+
+        For each page:
+        1. Get text content via get_page_text_content(page_id)
+        2. Save to cache/raw/
+        3. Run through SlidingWindowParser.process_text()
+        4. Build document dict for canonical JSON
+        """
+        os.makedirs("cache/raw", exist_ok=True)
+        parser = SlidingWindowParser()
+        documents = []
+
+        for doc in sp_docs:
+            page_id = doc.get("page_id")
+            page_title = doc.get("page_title", "Untitled")
+            source_uri = doc.get("source_uri", "")
+
+            if not page_id:
+                logger.warning(f"No page_id for {page_title}, skipping")
+                documents.append({
+                    "uri": source_uri,
+                    "source_type": "sharepoint_page",
+                    "cached_files": {},
+                    "followed_from": None,
+                    "sections": [],
+                    "errors": ["No page_id"],
+                })
+                continue
+
+            try:
+                # Get page text content via Graph API
+                extracted_text = get_page_content(page_id)
+
+                if not extracted_text:
+                    logger.warning(f"No content extracted for {page_title}, skipping")
+                    documents.append({
+                        "uri": source_uri,
+                        "source_type": "sharepoint_page",
+                        "cached_files": {},
+                        "followed_from": None,
+                        "sections": [],
+                        "errors": ["No text extracted from page"],
+                    })
+                    continue
+
+                # Create a filename from the page title
+                safe_title = "".join(c if c.isalnum() or c in "-_" else "_" for c in page_title)
+                txt_filename = f"{safe_title}.txt"
+                
+                # Save extracted text
+                txt_path = os.path.join("cache/raw", txt_filename)
+                with open(txt_path, "w", encoding="utf-8") as f:
+                    f.write(extracted_text)
+
+                # Process through sliding window (use "WebPage" thinker for site pages)
+                output_file = txt_path + ".processed"
+                count, sections = parser.process_file(
+                    txt_path,
+                    output_file,
+                    thinker_name="WebPage",
+                )
+                logger.info(f"Processed page '{page_title}': {len(sections)} sections")
+
+                documents.append({
+                    "uri": source_uri,
+                    "source_type": "sharepoint_page",
+                    "cached_files": {"raw_text": txt_path},
+                    "followed_from": None,
+                    "sections": sections,
+                    "errors": [],
+                })
+
+            except Exception as e:
+                logger.error(f"Failed to process SharePoint page {page_title}: {e}", exc_info=True)
+                self.errors.append({
+                    "type": "processing_error",
+                    "document_id": doc["document_id"],
+                    "message": str(e),
+                })
+                documents.append({
+                    "uri": source_uri,
+                    "source_type": "sharepoint_page",
                     "cached_files": {},
                     "followed_from": None,
                     "sections": [],
@@ -683,6 +781,18 @@ class IngestionOrchestrator:
                 db_record.rag_error_message = None
                 db_record.rag_retry_count = 0
                 stats["documents_processed"] += 1
+
+                # Update SharePoint tracker list
+                doc_title = source_uri.split("/")[-1] if source_uri else doc_id
+                try:
+                    vector_id = new_vector_ids[0] if new_vector_ids else None
+                    update_tracker_list(
+                        title=doc_title,
+                        url=source_uri,
+                        vector_id=vector_id,
+                    )
+                except Exception as e:
+                    logger.warning(f"Failed to update tracker list: {e}")
 
                 # Store all new vector IDs as JSON array
                 db_record.rag_vector_ids = json.dumps(new_vector_ids)

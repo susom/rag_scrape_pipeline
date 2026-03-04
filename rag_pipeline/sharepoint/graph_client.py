@@ -416,6 +416,89 @@ class SharePointGraphClient:
                     logger.warning(f"Failed to get content for page {page_id}: {e}")
                     yield page
 
+    def _strip_html(self, html: str) -> str:
+        """
+        Strip HTML tags from text using regex.
+        
+        Args:
+            html: HTML string
+            
+        Returns:
+            Plain text
+        """
+        import re
+        if not html:
+            return ""
+        # Remove HTML tags
+        text = re.sub(r'<[^>]+>', ' ', html)
+        # Normalize whitespace
+        text = re.sub(r'\s+', ' ', text).strip()
+        return text
+
+    def get_page_text_content(self, page_id: str) -> str:
+        """
+        Extract plain text content from a SharePoint site page.
+
+        Extracts text from all web parts including:
+        - textWebPart (innerHtml)
+        - Banner (title)
+        - Other web parts with searchablePlainTexts
+
+        Args:
+            page_id: Page ID
+
+        Returns:
+            Plain text content extracted from the page
+        """
+        web_parts = self.get_page_content(page_id)
+        page_info = self.get_page_by_id(page_id)
+        
+        text_parts = []
+        
+        # Add page title
+        title = page_info.get("title", "")
+        if title:
+            text_parts.append(f"Title: {title}")
+        
+        # Extract text from each web part
+        for wp in web_parts:
+            data = wp.get("data", {})
+            server_content = data.get("serverProcessedContent", {})
+            
+            # Get searchablePlainTexts
+            searchable = server_content.get("searchablePlainTexts", [])
+            for item in searchable:
+                if isinstance(item, dict):
+                    for key, value in item.items():
+                        if value:
+                            text_parts.append(str(value))
+            
+            # Get htmlStrings
+            html_strings = server_content.get("htmlStrings", [])
+            for item in html_strings:
+                if isinstance(item, dict):
+                    for key, value in item.items():
+                        if value:
+                            text = self._strip_html(value)
+                            if text:
+                                text_parts.append(text)
+            
+            # Get textWebPart innerHtml
+            inner_html = wp.get("innerHtml")
+            if inner_html:
+                text = self._strip_html(inner_html)
+                if text:
+                    text_parts.append(text)
+            
+            # Get Banner title
+            props = data.get("properties", {})
+            if props.get("title"):
+                banner_title = props.get("title", "")
+                if banner_title:
+                    text_parts.append(f"Section: {banner_title}")
+        
+        return "\n\n".join(text_parts)
+
     # ==================== Lists ====================
 
     def get_lists(
@@ -981,6 +1064,39 @@ class SharePointGraphClient:
 
         logger.info(f"Found {len(manifest)} files in manifest")
         return manifest
+
+    def add_list_item(
+        self,
+        list_id: str,
+        title: str,
+        url: str,
+        action: str = "Ingested successfully",
+    ) -> dict:
+        """
+        Add an item to a SharePoint list.
+
+        Args:
+            list_id: List ID
+            title: Title for the item
+            url: Hyperlink URL
+            action: Action text (default: "Ingested successfully")
+
+        Returns:
+            Created item response
+        """
+        site_id = self.get_site_id()
+
+        # Combine title and action into a single field for now
+        combined_title = f"{title[:100]} - {action[:100]}"
+
+        item_data = {
+            "fields": {
+                "Title": combined_title,
+            }
+        }
+
+        url = f"/sites/{site_id}/lists/{list_id}/items"
+        return self._make_request("POST", url, json_data=item_data)
 
     def download_file_content(self, download_url: str) -> bytes:
         """
