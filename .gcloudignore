@@ -1,0 +1,29 @@
+# Include defaults from .gitignore
+#!include:.gitignore
+
+# Python environments
+venv/
+.venv/
+ENV/
+__pycache__/
+
+# Project outputs
+cache/
+logs/
+
+# Git + IDE
+.git
+.vscode
+.idea
+
+# System
+.DS_Store
+
+# Secrets
+secrets/*
+.env
+
+# Tests/docs (not needed at runtime)
+tests/
+docs/
+*.md
