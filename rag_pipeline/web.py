@@ -1189,6 +1189,7 @@ async def ingest_batch(
     document_ids: str = None,
     dry_run: bool = False,
     days_back: int = 1,  # 24 hours
+    site: str = None,  # SharePoint site name (None for default)
     db: Session = Depends(get_db),
 ):
     """
@@ -1205,6 +1206,7 @@ async def ingest_batch(
         - force_reprocess: Ignore hash, reprocess all documents
         - document_ids: Comma-separated list of specific document IDs to process
         - dry_run: Report changes without actually ingesting
+        - site: SharePoint site name (e.g., "som"). Omit for default site.
 
     Returns:
         {
@@ -1247,10 +1249,13 @@ async def ingest_batch(
         modified_since = datetime.now(timezone.utc) - timedelta(days=days_back)
         logger.info(f"SharePoint date filter: files modified since {modified_since.isoformat()} ({days_back} days)")
 
+    # Determine lock key (per-site to allow concurrent multi-site runs)
+    lock_key = f"automated_ingestion:{site}" if site else "automated_ingestion"
+
     try:
         # Acquire distributed lock to prevent concurrent runs
         with DistributedLock(
-            lock_key="automated_ingestion",
+            lock_key=lock_key,
             db_session=db,
             timeout_minutes=60,
         ):
@@ -1261,12 +1266,14 @@ async def ingest_batch(
                 document_ids=doc_id_list,
                 dry_run=dry_run,
                 modified_since=modified_since,
+                site_name=site,
             )
 
             # Build response
             response = {
                 "status": result.status,
                 "run_id": result.run_id,
+                "site": site or "default",
                 "summary": {
                     "documents_processed": result.documents_processed,
                     "sections_ingested": result.sections_ingested,

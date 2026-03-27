@@ -1,0 +1,47 @@
+{
+  "_description": "SharePoint site-to-credential mapping. Secrets stored in GCP Secret Manager (project: som-rit-phi-redcap-prod).",
+  "sites": {
+    "redcap": {
+      "description": "Stanford REDCap knowledge base (primary site for RAG pipeline)",
+      "hostname": "office365stanford.sharepoint.com",
+      "path": "/sites/REDCap",
+      "display_name": "Stanford REDCap",
+      "credentials": {
+        "secret_manager_version": "latest",
+        "tenant_id": "396573cb-f378-4b68-9bc8-15755c0c51f3",
+        "client_id": "329f031c-27e0-4acb-af9b-124a2a3719e3",
+        "client_secret": "gcloud secrets versions access latest --secret=SHAREPOINT_CLIENT_SECRET --project=som-rit-phi-redcap-prod"
+      }
+    },
+    "som": {
+      "description": "School of Medicine REDCap group (SOM SharePoint)",
+      "hostname": "stanfordhealthcare.sharepoint.com",
+      "path": "/teams/SchoolofMedicineREDCap-grp",
+      "display_name": "SOM REDCap",
+      "credentials": {
+        "secret_manager_version": "1",
+        "tenant_id": "9866b506-dc9d-48dd-b720-3a50db77a1cc",
+        "client_id": "5d10edd9-7994-42a1-a40c-3f03146c4337",
+        "client_secret": "gcloud secrets versions access 1 --secret=SHAREPOINT_CLIENT_SECRET --project=som-rit-phi-redcap-prod"
+      }
+    },
+    "rexi": {
+      "description": "RExI site (SHC SharePoint - same tenant as REDCap)",
+      "hostname": "office365stanford.sharepoint.com",
+      "path": "/sites/RExI",
+      "display_name": "RExI",
+      "credentials": {
+        "secret_manager_version": "latest",
+        "tenant_id": "396573cb-f378-4b68-9bc8-15755c0c51f3",
+        "client_id": "329f031c-27e0-4acb-af9b-124a2a3719e3",
+        "client_secret": "gcloud secrets versions access latest --secret=SHAREPOINT_CLIENT_SECRET --project=som-rit-phi-redcap-prod"
+      }
+    }
+  },
+  "gcp_project": "som-rit-phi-redcap-prod",
+  "secret_names": {
+    "client_id": "SHAREPOINT_CLIENT_ID",
+    "client_secret": "SHAREPOINT_CLIENT_SECRET",
+    "tenant_id": "SHAREPOINT_TENANT_ID"
+  }
+}

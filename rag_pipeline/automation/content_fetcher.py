@@ -49,13 +49,17 @@ def extract_urls_from_text(text: str) -> List[str]:
     return sorted(list(set(urls)))
 
 
-def fetch_content_sources(modified_since: Optional[datetime] = None) -> Tuple[List[SharePointPage], List[str]]:
+def fetch_content_sources(
+    modified_since: Optional[datetime] = None,
+    site_name: Optional[str] = None,
+) -> Tuple[List[SharePointPage], List[str]]:
     """
     Fetch content from all configured sources.
 
     Args:
         modified_since: Optional datetime to filter pages by modification date.
                        Pages modified before this time are excluded (except external URLs page).
+        site_name: Optional site name to fetch from (None for default site).
 
     Returns:
         Tuple of:
@@ -64,16 +68,22 @@ def fetch_content_sources(modified_since: Optional[datetime] = None) -> Tuple[Li
 
     Note:
         Regular pages: filtered by publishingState.level == "published" AND lastModifiedDateTime >= modified_since
-        External URLs page: ALWAYS fetched regardless of date
+        External URLs page: ALWAYS fetched regardless of date (if configured for this site)
     """
     sharepoint_pages = []
     external_urls = []
 
-    # Get external URLs page ID from env
-    external_urls_page_id = os.getenv("SHAREPOINT_EXTERNAL_URLS_PAGE_ID", "").strip()
+    # Get external URLs page ID from env (site-specific or default)
+    # Pattern: SHAREPOINT_SITE_{NAME}_EXTERNAL_URLS_PAGE_ID or SHAREPOINT_EXTERNAL_URLS_PAGE_ID
+    if site_name and site_name != "default":
+        external_urls_page_id = os.getenv(
+            f"SHAREPOINT_SITE_{site_name.upper()}_EXTERNAL_URLS_PAGE_ID", ""
+        ).strip()
+    else:
+        external_urls_page_id = os.getenv("SHAREPOINT_EXTERNAL_URLS_PAGE_ID", "").strip()
 
     try:
-        site_config = get_site_config()
+        site_config = get_site_config(site_name)
         client = SharePointGraphClient(
             site_hostname=site_config.hostname,
             site_path=site_config.path,
@@ -164,7 +174,10 @@ def fetch_content_sources(modified_since: Optional[datetime] = None) -> Tuple[Li
             except Exception as e:
                 logger.error(f"Failed to fetch external URLs page: {e}")
         else:
-            logger.warning(f"External URLs page not found (ID: {external_urls_page_id})")
+            if external_urls_page_id:
+                logger.warning(f"External URLs page not found (ID: {external_urls_page_id})")
+            else:
+                logger.debug("No external URLs page configured for this site")
 
     except Exception as e:
         logger.error(f"Failed to initialize SharePoint client: {e}")
@@ -172,7 +185,7 @@ def fetch_content_sources(modified_since: Optional[datetime] = None) -> Tuple[Li
     return sharepoint_pages, external_urls
 
 
-def update_tracker_list(title: str, url: str, vector_id: str = None) -> bool:
+def update_tracker_list(title: str, url: str, vector_id: str = None, site_name: Optional[str] = None) -> bool:
     """
     Add an entry to the SharePoint ingestion tracker list.
 
@@ -180,17 +193,25 @@ def update_tracker_list(title: str, url: str, vector_id: str = None) -> bool:
         title: Title of the page/URL
         url: The URL that was ingested
         vector_id: The vector ID from RAG ingestion (optional)
+        site_name: Optional site name (None for default site)
 
     Returns:
         True if successful, False otherwise
     """
-    tracker_list_id = os.getenv("SHAREPOINT_TRACKER_LIST_ID", "").strip()
+    # Site-specific or default tracker list ID
+    if site_name and site_name != "default":
+        tracker_list_id = os.getenv(
+            f"SHAREPOINT_SITE_{site_name.upper()}_TRACKER_LIST_ID", ""
+        ).strip()
+    else:
+        tracker_list_id = os.getenv("SHAREPOINT_TRACKER_LIST_ID", "").strip()
+
     if not tracker_list_id:
         logger.debug("No tracker list configured, skipping")
         return False
 
     try:
-        site_config = get_site_config()
+        site_config = get_site_config(site_name)
         client = SharePointGraphClient(
             site_hostname=site_config.hostname,
             site_path=site_config.path,
@@ -214,7 +235,7 @@ def update_tracker_list(title: str, url: str, vector_id: str = None) -> bool:
         return False
 
 
-def get_page_content(page_id: str) -> str:
+def get_page_content(page_id: str, site_name: Optional[str] = None) -> str:
     """
     Get the text content of a specific SharePoint page.
     
@@ -222,12 +243,13 @@ def get_page_content(page_id: str) -> str:
 
     Args:
         page_id: The SharePoint page ID
+        site_name: Optional site name (None for default site)
 
     Returns:
         Plain text content of the page
     """
     try:
-        site_config = get_site_config()
+        site_config = get_site_config(site_name)
         client = SharePointGraphClient(
             site_hostname=site_config.hostname,
             site_path=site_config.path,

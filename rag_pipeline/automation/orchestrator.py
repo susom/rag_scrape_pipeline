@@ -71,9 +71,11 @@ class IngestionOrchestrator:
     - Track state and handle errors
     """
 
-    def __init__(self, db_session: Session, dry_run: bool = False):
+    def __init__(self, db_session: Session, dry_run: bool = False, site_name: Optional[str] = None):
         self.db = db_session
         self.dry_run = dry_run
+        self.site_name = site_name
+        self.namespace = site_name if site_name and site_name != "default" else None
         self.errors = []
         self.start_time = datetime.now(timezone.utc)
         self._sp_client = None  # Lazy-initialized SharePoint client
@@ -82,7 +84,7 @@ class IngestionOrchestrator:
     def _get_sp_client(self) -> SharePointGraphClient:
         """Lazy-initialize SharePoint client for file downloads."""
         if self._sp_client is None:
-            site_config = get_site_config()
+            site_config = get_site_config(self.site_name)
             self._sp_client = SharePointGraphClient(
                 site_hostname=site_config.hostname,
                 site_path=site_config.path,
@@ -207,7 +209,7 @@ class IngestionOrchestrator:
                           Pages modified before this time are excluded (except external URLs page).
         """
         try:
-            return fetch_content_sources(modified_since=modified_since)
+            return fetch_content_sources(modified_since=modified_since, site_name=self.site_name)
         except Exception as e:
             logger.error(f"Content fetching failed: {e}")
             self.errors.append({
@@ -325,7 +327,8 @@ class IngestionOrchestrator:
             return True
 
         existing = self.db.query(DocumentIngestionState).filter(
-            DocumentIngestionState.document_id == document_id
+            DocumentIngestionState.document_id == document_id,
+            DocumentIngestionState.rag_namespace == self.namespace,
         ).first()
 
         if not existing:
@@ -347,7 +350,8 @@ class IngestionOrchestrator:
 
         try:
             existing = self.db.query(DocumentIngestionState).filter(
-                DocumentIngestionState.document_id == document_id
+                DocumentIngestionState.document_id == document_id,
+                DocumentIngestionState.rag_namespace == self.namespace,
             ).first()
 
             if existing:
@@ -542,7 +546,7 @@ class IngestionOrchestrator:
 
             try:
                 # Get page text content via Graph API
-                extracted_text = get_page_content(page_id)
+                extracted_text = get_page_content(page_id, site_name=self.site_name)
 
                 if not extracted_text:
                     logger.warning(f"No content extracted for {page_title}, skipping")
@@ -687,7 +691,8 @@ class IngestionOrchestrator:
 
             # Get or create database record
             db_record = self.db.query(DocumentIngestionState).filter(
-                DocumentIngestionState.document_id == document_id
+                DocumentIngestionState.document_id == document_id,
+                DocumentIngestionState.rag_namespace == self.namespace,
             ).first()
 
             # Compute content hash:
@@ -710,6 +715,7 @@ class IngestionOrchestrator:
                     last_processed_at=datetime.now(timezone.utc),
                     last_content_update_at=datetime.now(timezone.utc),
                     rag_ingestion_status="processing",
+                    rag_namespace=self.namespace,
                     sections_total=len(sections),
                 )
                 self.db.add(db_record)
@@ -751,6 +757,7 @@ class IngestionOrchestrator:
                             "source_uri": source_uri,
                             "section_hash": section["section_hash"],
                         },
+                        namespace=self.namespace,
                     )
 
                     vector_id = result.get("vector_id")
@@ -790,6 +797,7 @@ class IngestionOrchestrator:
                         title=doc_title,
                         url=source_uri,
                         vector_id=vector_id,
+                        site_name=self.site_name,
                     )
                 except Exception as e:
                     logger.warning(f"Failed to update tracker list: {e}")
@@ -893,6 +901,7 @@ def run_automated_ingestion(
     document_ids: Optional[List[str]] = None,
     dry_run: bool = False,
     modified_since: Optional[datetime] = None,
+    site_name: Optional[str] = None,
 ) -> IngestionResult:
     """
     Run automated ingestion workflow.
@@ -907,6 +916,7 @@ def run_automated_ingestion(
         modified_since: Only fetch SharePoint files modified since this datetime.
                         external-urls.txt is always fetched regardless.
                         None = fetch all files (full sync).
+        site_name: Optional SharePoint site name (None for default site).
 
     Returns:
         IngestionResult with summary statistics
@@ -917,6 +927,7 @@ def run_automated_ingestion(
     orchestrator = IngestionOrchestrator(
         db_session=db_session,
         dry_run=dry_run,
+        site_name=site_name,
     )
 
     return orchestrator.run(
