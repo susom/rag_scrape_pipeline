@@ -88,6 +88,9 @@ class IngestionOrchestrator:
             self._sp_client = SharePointGraphClient(
                 site_hostname=site_config.hostname,
                 site_path=site_config.path,
+                tenant_id=site_config.tenant_id,
+                client_id=site_config.client_id,
+                client_secret=site_config.client_secret,
             )
         return self._sp_client
 

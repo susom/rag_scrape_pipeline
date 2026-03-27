@@ -87,6 +87,9 @@ def fetch_content_sources(
         client = SharePointGraphClient(
             site_hostname=site_config.hostname,
             site_path=site_config.path,
+            tenant_id=site_config.tenant_id,
+            client_id=site_config.client_id,
+            client_secret=site_config.client_secret,
         )
 
         # --- Fetch all site pages ---
@@ -215,6 +218,9 @@ def update_tracker_list(title: str, url: str, vector_id: str = None, site_name: 
         client = SharePointGraphClient(
             site_hostname=site_config.hostname,
             site_path=site_config.path,
+            tenant_id=site_config.tenant_id,
+            client_id=site_config.client_id,
+            client_secret=site_config.client_secret,
         )
 
         action = f"Ingested successfully"
@@ -253,6 +259,9 @@ def get_page_content(page_id: str, site_name: Optional[str] = None) -> str:
         client = SharePointGraphClient(
             site_hostname=site_config.hostname,
             site_path=site_config.path,
+            tenant_id=site_config.tenant_id,
+            client_id=site_config.client_id,
+            client_secret=site_config.client_secret,
         )
         return client.get_page_text_content(page_id)
     except Exception as e:

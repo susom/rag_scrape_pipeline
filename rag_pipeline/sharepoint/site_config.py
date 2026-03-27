@@ -5,17 +5,22 @@ Supports multiple site configurations via environment variables:
 - Default site: SHAREPOINT_SITE_HOSTNAME, SHAREPOINT_SITE_PATH
 - Named sites: SHAREPOINT_SITE_{NAME}_HOSTNAME, SHAREPOINT_SITE_{NAME}_PATH
 
+Credentials per site (optional — falls back to global SHAREPOINT_* vars / Secret Manager):
+- SHAREPOINT_SITE_{NAME}_TENANT_ID
+- SHAREPOINT_SITE_{NAME}_CLIENT_ID
+- SHAREPOINT_SITE_{NAME}_CLIENT_SECRET
+
 Example .env configuration:
     # Default site
     SHAREPOINT_SITE_HOSTNAME=contoso.sharepoint.com
     SHAREPOINT_SITE_PATH=/sites/MainSite
 
-    # Additional named sites
-    SHAREPOINT_SITE_HR_HOSTNAME=contoso.sharepoint.com
-    SHAREPOINT_SITE_HR_PATH=/sites/HumanResources
-
-    SHAREPOINT_SITE_FINANCE_HOSTNAME=contoso.sharepoint.com
-    SHAREPOINT_SITE_FINANCE_PATH=/sites/Finance
+    # Additional named site with its own Azure AD credentials (different tenant)
+    SHAREPOINT_SITE_SOM_HOSTNAME=other.sharepoint.com
+    SHAREPOINT_SITE_SOM_PATH=/teams/SomGroup
+    SHAREPOINT_SITE_SOM_TENANT_ID=xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx
+    SHAREPOINT_SITE_SOM_CLIENT_ID=yyyyyyyy-yyyy-yyyy-yyyy-yyyyyyyyyyyy
+    SHAREPOINT_SITE_SOM_CLIENT_SECRET=secret_value
 """
 
 import os
@@ -32,6 +37,11 @@ class SiteConfig:
     name: str
     hostname: str
     path: str
+    # Optional per-site Azure AD credentials.
+    # If None, SharePointGraphClient falls back to global env vars / Secret Manager.
+    tenant_id: Optional[str] = None
+    client_id: Optional[str] = None
+    client_secret: Optional[str] = None
 
     @property
     def full_url(self) -> str:
@@ -88,6 +98,9 @@ class SiteConfigManager:
                             name=normalized_name,
                             hostname=hostname,
                             path=path,
+                            tenant_id=os.getenv(f"SHAREPOINT_SITE_{site_name}_TENANT_ID", "").strip() or None,
+                            client_id=os.getenv(f"SHAREPOINT_SITE_{site_name}_CLIENT_ID", "").strip() or None,
+                            client_secret=os.getenv(f"SHAREPOINT_SITE_{site_name}_CLIENT_SECRET", "").strip() or None,
                         )
                         logger.info(f"Loaded SharePoint site '{normalized_name}': {hostname}{path}")
 
