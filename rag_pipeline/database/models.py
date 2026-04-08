@@ -5,7 +5,7 @@ SQLAlchemy models for RAG Pipeline (MySQL compatible).
 import uuid
 import hashlib
 from datetime import datetime, timezone
-from sqlalchemy import Column, String, DateTime, Text, ForeignKey, Boolean, Integer, CHAR, BigInteger, LargeBinary
+from sqlalchemy import Column, String, DateTime, Text, ForeignKey, Boolean, Integer, CHAR, BigInteger, LargeBinary, UniqueConstraint
 from sqlalchemy.orm import declarative_base, relationship
 from sqlalchemy.types import TypeDecorator
 
@@ -42,10 +42,10 @@ class DocumentIngestionState(Base):
     # Primary key - auto increment bigint
     id = Column(BigInteger, primary_key=True, autoincrement=True)
 
-    # Document identifier (unique)
+    # Document identifier (unique within namespace)
     # For SharePoint pages: use SharePoint ID
     # For uploaded docs/external URLs: generate unique ID based on title/URL
-    document_id = Column(String(255), unique=True, nullable=False, index=True)
+    document_id = Column(String(255), nullable=False, index=True)
 
     # Content hash for change detection - stored as binary(32)
     content_hash = Column(LargeBinary(32), nullable=False, index=True)
@@ -68,6 +68,10 @@ class DocumentIngestionState(Base):
 
     rag_namespace = Column(String(255), nullable=True)
     # Vector namespace
+
+    __table_args__ = (
+        UniqueConstraint("document_id", "rag_namespace", name="uq_document_namespace"),
+    )
 
     rag_last_ingested_at = Column(DateTime(), nullable=True, index=True)
     # Last successful ingestion timestamp
@@ -179,6 +183,5 @@ class User(Base):
 
     def __repr__(self):
         return f"<User(id={self.id}, username='{self.username}')>"
-
 
 

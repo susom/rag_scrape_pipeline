@@ -76,6 +76,7 @@ class IngestionOrchestrator:
         self.dry_run = dry_run
         self.site_name = site_name
         self.namespace = site_name if site_name and site_name != "default" else None
+        self.db_namespace = self.namespace or "default"
         self.errors = []
         self.start_time = datetime.now(timezone.utc)
         self._sp_client = None  # Lazy-initialized SharePoint client
@@ -331,7 +332,7 @@ class IngestionOrchestrator:
 
         existing = self.db.query(DocumentIngestionState).filter(
             DocumentIngestionState.document_id == document_id,
-            DocumentIngestionState.rag_namespace == self.namespace,
+            DocumentIngestionState.rag_namespace == self.db_namespace,
         ).first()
 
         if not existing:
@@ -354,7 +355,7 @@ class IngestionOrchestrator:
         try:
             existing = self.db.query(DocumentIngestionState).filter(
                 DocumentIngestionState.document_id == document_id,
-                DocumentIngestionState.rag_namespace == self.namespace,
+                DocumentIngestionState.rag_namespace == self.db_namespace,
             ).first()
 
             if existing:
@@ -695,7 +696,7 @@ class IngestionOrchestrator:
             # Get or create database record
             db_record = self.db.query(DocumentIngestionState).filter(
                 DocumentIngestionState.document_id == document_id,
-                DocumentIngestionState.rag_namespace == self.namespace,
+                DocumentIngestionState.rag_namespace == self.db_namespace,
             ).first()
 
             # Compute content hash:
@@ -718,7 +719,7 @@ class IngestionOrchestrator:
                     last_processed_at=datetime.now(timezone.utc),
                     last_content_update_at=datetime.now(timezone.utc),
                     rag_ingestion_status="processing",
-                    rag_namespace=self.namespace,
+                    rag_namespace=self.db_namespace,
                     sections_total=len(sections),
                 )
                 self.db.add(db_record)
@@ -769,7 +770,9 @@ class IngestionOrchestrator:
                     # Keep first vector_id as representative (backward compat)
                     if sections_succeeded == 0:
                         db_record.rag_vector_id = vector_id
-                        db_record.rag_namespace = result.get("namespace")
+                        result_namespace = result.get("namespace") or self.db_namespace
+                        if result_namespace:
+                            db_record.rag_namespace = result_namespace
 
                     sections_succeeded += 1
                     stats["sections_ingested"] += 1
