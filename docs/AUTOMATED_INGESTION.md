@@ -136,9 +136,17 @@ class SharePointClient:
 SHAREPOINT_TENANT_ID=<tenant>
 SHAREPOINT_CLIENT_ID=<client_id>
 SHAREPOINT_CLIENT_SECRET=<secret>
-SHAREPOINT_SITE_URL=https://<tenant>.sharepoint.com/sites/<site>
-SHAREPOINT_LIBRARY_NAME=Documents
-SHAREPOINT_URLS_PAGE_ID=<page_id>
+SHAREPOINT_SITE_HOSTNAME=<tenant>.sharepoint.com
+SHAREPOINT_SITE_PATH=/sites/<site>
+# Optional per-site overrides:
+SHAREPOINT_SITE_<NAME>_CONTENT_SOURCE=site_pages|document_library
+SHAREPOINT_SITE_<NAME>_LIBRARY_PREFIXES="Library 1,Library 2"
+SHAREPOINT_SITE_<NAME>_EXTERNAL_URLS_PAGE_ID=<page_id>  # for site pages mode
+SHAREPOINT_SITE_<NAME>_EXTERNAL_URLS_DRIVE=<drive name>
+SHAREPOINT_SITE_<NAME>_EXTERNAL_URLS_FILE=<file name>
+SHAREPOINT_SITE_<NAME>_TRACKER_LIST_ID=<list id>
+SHAREPOINT_SITE_<NAME>_TRACKER_LIST_NAME=<list name>
+RAG_NAMESPACE_OVERRIDE=<namespace>
 ```
 
 ### 5. Content Fetcher (`rag_pipeline/automation/content_fetcher.py`)
@@ -146,12 +154,12 @@ SHAREPOINT_URLS_PAGE_ID=<page_id>
 Unified content fetching coordinator:
 
 ```python
-def fetch_content_sources() -> Tuple[List[SharePointDocument], List[str]]:
+def fetch_content_sources() -> Tuple[List[SharePointPage], List[SharePointFile], List[str]]:
     """
     Fetch from all sources.
 
     Returns:
-        (sharepoint_documents, external_urls)
+        (sharepoint_pages, sharepoint_files, external_urls)
     """
 ```
 

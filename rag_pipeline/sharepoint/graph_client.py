@@ -45,6 +45,9 @@ class SharePointItem:
     size: Optional[int] = None  # Files only
     last_modified: Optional[datetime] = None
     created_by: Optional[str] = None
+    library_name: Optional[str] = None
+    parent_path: Optional[str] = None
+    list_item_fields: Optional[dict] = None
 
 
 class SharePointGraphClient:
@@ -559,6 +562,29 @@ class SharePointGraphClient:
 
         raise ValueError(f"List '{list_name}' not found")
 
+    def get_list_columns(
+        self,
+        list_id: str,
+        max_items: Optional[int] = None,
+    ) -> Generator[dict, None, None]:
+        """
+        Get columns (field definitions) for a SharePoint list.
+
+        Args:
+            list_id: List ID
+            max_items: Maximum number of columns to return
+
+        Yields:
+            Column objects
+        """
+        site_id = self.get_site_id()
+        url = f"/sites/{site_id}/lists/{list_id}/columns"
+
+        logger.info(f"Fetching columns for list {list_id}")
+
+        for column in self._paginate(url, max_items=max_items):
+            yield column
+
     def get_list_items(
         self,
         list_id: str,
@@ -802,6 +828,7 @@ class SharePointGraphClient:
         folder_path: str = "",
         max_items: Optional[int] = None,
         recursive: bool = False,
+        expand_fields: bool = False,
     ) -> Generator[dict, None, None]:
         """
         Get items from a drive (document library).
@@ -830,7 +857,11 @@ class SharePointGraphClient:
 
         items_yielded = 0
 
-        for item in self._paginate(url, max_items=max_items):
+        params = {}
+        if expand_fields:
+            params["$expand"] = "listItem($expand=fields)"
+
+        for item in self._paginate(url, params=params, max_items=max_items):
             yield item
             items_yielded += 1
 
@@ -845,6 +876,7 @@ class SharePointGraphClient:
                         folder_path=item_path,
                         max_items=remaining,
                         recursive=True,
+                        expand_fields=expand_fields,
                     ):
                         yield child
                         items_yielded += 1
@@ -993,6 +1025,8 @@ class SharePointGraphClient:
         folder_path: str = "",
         modified_since: Optional[datetime] = None,
         drive_id: Optional[str] = None,
+        include_fields: bool = False,
+        library_name: Optional[str] = None,
     ) -> List[SharePointItem]:
         """
         Fetch document manifest from a SharePoint drive folder.
@@ -1004,6 +1038,8 @@ class SharePointGraphClient:
             folder_path: Folder path within the drive (empty for root)
             modified_since: Only return items modified after this datetime
             drive_id: Specific drive ID (uses default drive if None)
+            include_fields: Include list item fields (e.g., approval status)
+            library_name: Optional document library name
 
         Returns:
             List of SharePointItem objects (files only, manifest metadata)
@@ -1020,6 +1056,7 @@ class SharePointGraphClient:
             drive_id=drive_id,
             folder_path=folder_path,
             recursive=True,
+            expand_fields=include_fields,
         ))
 
         manifest = []
@@ -1051,6 +1088,10 @@ class SharePointGraphClient:
                 if last_modified < modified_since:
                     continue
 
+            list_item_fields = None
+            if include_fields:
+                list_item_fields = item.get("listItem", {}).get("fields", {})
+
             manifest.append(SharePointItem(
                 sharepoint_id=item.get("id", ""),
                 name=name,
@@ -1060,6 +1101,9 @@ class SharePointGraphClient:
                 mime_type=item.get("file", {}).get("mimeType"),
                 size=item.get("size"),
                 last_modified=last_modified,
+                library_name=library_name,
+                parent_path=(item.get("parentReference") or {}).get("path"),
+                list_item_fields=list_item_fields,
             ))
 
         logger.info(f"Found {len(manifest)} files in manifest")
@@ -1068,9 +1112,10 @@ class SharePointGraphClient:
     def add_list_item(
         self,
         list_id: str,
-        title: str,
-        url: str,
+        title: Optional[str] = None,
+        url: Optional[str] = None,
         action: str = "Ingested successfully",
+        fields: Optional[dict] = None,
     ) -> dict:
         """
         Add an item to a SharePoint list.
@@ -1080,23 +1125,43 @@ class SharePointGraphClient:
             title: Title for the item
             url: Hyperlink URL
             action: Action text (default: "Ingested successfully")
+            fields: Optional fields dict to send as-is
 
         Returns:
             Created item response
         """
         site_id = self.get_site_id()
 
-        # Combine title and action into a single field for now
-        combined_title = f"{title[:100]} - {action[:100]}"
+        if fields is None:
+            safe_title = title or "Ingestion"
+            combined_title = f"{safe_title[:100]} - {action[:100]}"
+            fields = {"Title": combined_title}
 
-        item_data = {
-            "fields": {
-                "Title": combined_title,
-            }
-        }
+        item_data = {"fields": fields}
 
-        url = f"/sites/{site_id}/lists/{list_id}/items"
-        return self._make_request("POST", url, json_data=item_data)
+        list_url = f"/sites/{site_id}/lists/{list_id}/items"
+        return self._make_request("POST", list_url, json_data=item_data)
+
+    def update_list_item_fields(
+        self,
+        list_id: str,
+        item_id: str,
+        fields: dict,
+    ) -> dict:
+        """
+        Update fields on a SharePoint list item.
+
+        Args:
+            list_id: List ID
+            item_id: Item ID
+            fields: Fields dict to update
+
+        Returns:
+            Update response
+        """
+        site_id = self.get_site_id()
+        url = f"/sites/{site_id}/lists/{list_id}/items/{item_id}/fields"
+        return self._make_request("PATCH", url, json_data=fields)
 
     def download_file_content(self, download_url: str) -> bytes:
         """
@@ -1113,4 +1178,3 @@ class SharePointGraphClient:
         response = requests.get(download_url, timeout=120)
         response.raise_for_status()
         return response.content
-

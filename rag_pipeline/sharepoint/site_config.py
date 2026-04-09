@@ -10,6 +10,13 @@ Credentials per site (optional — falls back to global SHAREPOINT_* vars / Secr
 - SHAREPOINT_SITE_{NAME}_CLIENT_ID
 - SHAREPOINT_SITE_{NAME}_CLIENT_SECRET
 
+Content source configuration:
+- SHAREPOINT_SITE_{NAME}_CONTENT_SOURCE: "site_pages" (default) or "document_library"
+- SHAREPOINT_SITE_{NAME}_LIBRARY_PREFIXES: Comma-separated library name prefixes (e.g., "Library 1,Library 2")
+- SHAREPOINT_SITE_{NAME}_EXTERNAL_URLS_DRIVE: Optional drive name for external URLs file
+- SHAREPOINT_SITE_{NAME}_EXTERNAL_URLS_FILE: Optional external URLs file name
+- SHAREPOINT_SITE_{NAME}_APPROVAL_FIELD: Optional list field name for approval status
+
 Example .env configuration:
     # Default site
     SHAREPOINT_SITE_HOSTNAME=contoso.sharepoint.com
@@ -24,7 +31,7 @@ Example .env configuration:
 """
 
 import os
-from typing import Optional
+from typing import Optional, List
 from dataclasses import dataclass
 from rag_pipeline.utils.logger import setup_logger
 
@@ -37,6 +44,11 @@ class SiteConfig:
     name: str
     hostname: str
     path: str
+    content_source: str = "site_pages"
+    library_prefixes: Optional[List[str]] = None
+    external_urls_drive: Optional[str] = None
+    external_urls_file: Optional[str] = None
+    approval_field: Optional[str] = None
     # Optional per-site Azure AD credentials.
     # If None, SharePointGraphClient falls back to global env vars / Secret Manager.
     tenant_id: Optional[str] = None
@@ -66,17 +78,31 @@ class SiteConfigManager:
         self._sites: dict[str, SiteConfig] = {}
         self._load_sites()
 
+    @staticmethod
+    def _parse_csv(value: str) -> List[str]:
+        return [item.strip() for item in value.split(",") if item.strip()]
+
     def _load_sites(self):
         """Load all site configurations from environment variables."""
         # Load default site
         default_hostname = os.getenv("SHAREPOINT_SITE_HOSTNAME", "").strip()
         default_path = os.getenv("SHAREPOINT_SITE_PATH", "").strip()
+        default_content_source = os.getenv("SHAREPOINT_SITE_CONTENT_SOURCE", "site_pages").strip() or "site_pages"
+        default_library_prefixes = self._parse_csv(os.getenv("SHAREPOINT_SITE_LIBRARY_PREFIXES", ""))
+        default_external_urls_drive = os.getenv("SHAREPOINT_SITE_EXTERNAL_URLS_DRIVE", "").strip() or None
+        default_external_urls_file = os.getenv("SHAREPOINT_SITE_EXTERNAL_URLS_FILE", "").strip() or None
+        default_approval_field = os.getenv("SHAREPOINT_SITE_APPROVAL_FIELD", "").strip() or None
 
         if default_hostname:
             self._sites["default"] = SiteConfig(
                 name="default",
                 hostname=default_hostname,
                 path=default_path,
+                content_source=default_content_source.lower(),
+                library_prefixes=default_library_prefixes or None,
+                external_urls_drive=default_external_urls_drive,
+                external_urls_file=default_external_urls_file,
+                approval_field=default_approval_field,
             )
             logger.info(f"Loaded default SharePoint site: {default_hostname}{default_path}")
 
@@ -91,6 +117,21 @@ class SiteConfigManager:
                     hostname = value.strip()
                     path_key = f"SHAREPOINT_SITE_{site_name}_PATH"
                     path = os.getenv(path_key, "").strip()
+                    content_source = os.getenv(
+                        f"SHAREPOINT_SITE_{site_name}_CONTENT_SOURCE", "site_pages"
+                    ).strip() or "site_pages"
+                    library_prefixes = self._parse_csv(
+                        os.getenv(f"SHAREPOINT_SITE_{site_name}_LIBRARY_PREFIXES", "")
+                    )
+                    external_urls_drive = os.getenv(
+                        f"SHAREPOINT_SITE_{site_name}_EXTERNAL_URLS_DRIVE", ""
+                    ).strip() or None
+                    external_urls_file = os.getenv(
+                        f"SHAREPOINT_SITE_{site_name}_EXTERNAL_URLS_FILE", ""
+                    ).strip() or None
+                    approval_field = os.getenv(
+                        f"SHAREPOINT_SITE_{site_name}_APPROVAL_FIELD", ""
+                    ).strip() or None
 
                     if hostname:
                         normalized_name = site_name.lower()
@@ -101,6 +142,11 @@ class SiteConfigManager:
                             tenant_id=os.getenv(f"SHAREPOINT_SITE_{site_name}_TENANT_ID", "").strip() or None,
                             client_id=os.getenv(f"SHAREPOINT_SITE_{site_name}_CLIENT_ID", "").strip() or None,
                             client_secret=os.getenv(f"SHAREPOINT_SITE_{site_name}_CLIENT_SECRET", "").strip() or None,
+                            content_source=content_source.lower(),
+                            library_prefixes=library_prefixes or None,
+                            external_urls_drive=external_urls_drive,
+                            external_urls_file=external_urls_file,
+                            approval_field=approval_field,
                         )
                         logger.info(f"Loaded SharePoint site '{normalized_name}': {hostname}{path}")
 
@@ -173,4 +219,3 @@ def get_site_config(name: Optional[str] = None) -> SiteConfig:
         SiteConfig
     """
     return get_site_config_manager().get_site(name)
-

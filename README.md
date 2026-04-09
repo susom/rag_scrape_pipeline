@@ -241,10 +241,17 @@ Schema version: `rpp.v1`
 | `SHAREPOINT_TENANT_ID` | For automation | Azure AD tenant ID |
 | `SHAREPOINT_CLIENT_ID` | For automation | App registration client ID |
 | `SHAREPOINT_CLIENT_SECRET` | For automation | App registration secret |
-| `SHAREPOINT_SITE_URL` | For automation | SharePoint site URL |
-| `SHAREPOINT_DRIVE_ID` | No | Drive ID (auto-detected if omitted) |
-| `SHAREPOINT_FOLDER_PATH` | No | Folder path (default: `Shared Documents`) |
-| `SHAREPOINT_URLS_PAGE_ID` | No | SharePoint page ID for external URLs |
+| `SHAREPOINT_SITE_HOSTNAME` | For automation | SharePoint site hostname (e.g., `office365stanford.sharepoint.com`) |
+| `SHAREPOINT_SITE_PATH` | For automation | SharePoint site path (e.g., `/sites/RExI`) |
+| `SHAREPOINT_URLS_PAGE_ID` | No | SharePoint page ID for external URLs (site pages mode) |
+| `SHAREPOINT_SITE_CONTENT_SOURCE` | No | `site_pages` or `document_library` (default: `site_pages`) |
+| `SHAREPOINT_SITE_LIBRARY_PREFIXES` | No | Comma-separated library prefixes (document library mode) |
+| `SHAREPOINT_SITE_EXTERNAL_URLS_DRIVE` | No | Drive name for external URLs file |
+| `SHAREPOINT_SITE_EXTERNAL_URLS_FILE` | No | External URLs file name |
+| `SHAREPOINT_SITE_APPROVAL_FIELD` | No | Optional approval field override |
+| `SHAREPOINT_TRACKER_LIST_ID` | No | Tracker list ID for ingestion updates |
+| `SHAREPOINT_TRACKER_LIST_NAME` | No | Tracker list name (ID auto-resolved) |
+| `RAG_NAMESPACE_OVERRIDE` | No | Forces the namespace sent to the RAG EM API and stored in DB |
 | **Database (for automation)** | | |
 | `DB_USER` | For automation | Database username |
 | `DB_PASSWORD` | For automation | Database password |
@@ -346,13 +353,14 @@ The pipeline uses **source-type-aware extraction** to apply the right level of f
 The pipeline fetches content from SharePoint and ingests it into the RAG vector database on a cron schedule.
 
 **Input Sources (via Microsoft Graph API):**
-- **Document manifest**: DOCX, PDF, TXT files from a configured SharePoint folder (filtered by `modified_since` date)
-- **External URLs file**: `external-urls.txt` in Shared Documents - URLs extracted and scraped every run (bypasses date filter)
+- **Site pages** (for sites configured with `content_source=site_pages`)
+- **Document libraries** (for sites configured with `content_source=document_library`)
+- **External URLs** (from a page or file, depending on the site’s content source)
 
 **Automated Workflow (`POST /api/ingest-batch`):**
 1. Acquire distributed lock (prevents concurrent runs)
-2. Fetch document manifest (respecting `modified_since` date filter) + external URLs from SharePoint
-3. **external-urls.txt** is always fetched regardless of date - URLs inside are extracted every run
+2. Fetch site pages or document libraries (respecting `modified_since` date filter) + external URLs from SharePoint
+3. External URLs source is always fetched when configured - URLs inside are extracted every run
 4. Delta detection:
    - SharePoint files: `lastModifiedDateTime` from Graph API vs `last_processed_at` in DB
    - External URLs: SHA-256 hash of scraped content vs `content_hash` in DB
@@ -361,9 +369,18 @@ The pipeline fetches content from SharePoint and ingests it into the RAG vector 
 7. Clean up stale vectors on re-ingestion
 
 **Date Filtering:**
-- SharePoint files respect `modified_since` parameter (e.g., 7 days for weekly cron)
-- `external-urls.txt` is **always fetched** (bypasses date filter) - the URLs inside may change even if the file doesn't
+- SharePoint pages/files respect `modified_since` parameter (e.g., 7 days for weekly cron)
+- External URLs source is **always fetched** when configured (bypasses date filter)
 - Client-side filtering (reliable, avoids Graph API OData filter syntax issues)
+
+**Per-site Content Source Configuration:**
+- `SHAREPOINT_SITE_{NAME}_CONTENT_SOURCE`: `site_pages` (default) or `document_library`
+- `SHAREPOINT_SITE_{NAME}_LIBRARY_PREFIXES`: Comma-separated library name prefixes (e.g., `Library 1,Library 2`)
+- `SHAREPOINT_SITE_{NAME}_EXTERNAL_URLS_DRIVE` / `SHAREPOINT_SITE_{NAME}_EXTERNAL_URLS_FILE`: Optional external URLs file
+- `SHAREPOINT_SITE_{NAME}_APPROVAL_FIELD`: Optional list field name for approval status filtering
+- `SHAREPOINT_SITE_{NAME}_TRACKER_LIST_ID`: Updates list ID for ingestion logging
+- `SHAREPOINT_SITE_{NAME}_TRACKER_LIST_NAME`: Optional list display name (ID auto-resolved)
+- `SHAREPOINT_SITE_{NAME}_TRACKER_FIELD_CONTENT_SECTION` / `DOCUMENT_TITLE` / `VERSION` / `SUMMARY`: Optional tracker field name overrides
 
 **Database Tracking (Cloud SQL / MySQL):**
 - `document_ingestion_state` table: content hash, vector IDs, ingestion status, retry counts

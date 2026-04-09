@@ -11,6 +11,7 @@ Coordinates:
 
 import os
 import json
+import re
 from datetime import datetime, timezone
 from typing import List, Optional, Dict, Tuple
 from dataclasses import dataclass, asdict
@@ -21,6 +22,7 @@ from rag_pipeline.automation.content_fetcher import (
     fetch_content_sources,
     fetch_content_sources_stub,
     SharePointPage,
+    SharePointFile,
     get_page_content,
     update_tracker_list,
 )
@@ -39,6 +41,44 @@ logger = setup_logger()
 # Configuration
 DEFAULT_LOCK_TIMEOUT_MINUTES = int(os.getenv("INGESTION_LOCK_TIMEOUT_MINUTES", "60"))
 DEFAULT_MAX_RETRIES = int(os.getenv("INGESTION_MAX_RETRIES", "3"))
+
+
+def _normalize_library_label(library_name: Optional[str]) -> Optional[str]:
+    if not library_name:
+        return None
+    label = library_name.strip()
+    if label.lower().endswith(" library"):
+        label = label[:-len(" library")].rstrip()
+    return re.sub(r"\s*:\s*", " : ", label)
+
+
+def _extract_parent_folder(parent_path: Optional[str]) -> Optional[str]:
+    if not parent_path:
+        return None
+    if "root:" in parent_path:
+        parent_path = parent_path.split("root:", 1)[1]
+    parent_path = parent_path.strip("/")
+    if not parent_path:
+        return None
+    return parent_path.split("/")[-1]
+
+
+def _build_content_section(library_name: Optional[str], parent_path: Optional[str]) -> Optional[str]:
+    label = _normalize_library_label(library_name)
+    parent_folder = _extract_parent_folder(parent_path)
+
+    prefix = None
+    suffix = None
+    if label:
+        if " : " in label:
+            prefix, suffix = label.split(" : ", 1)
+        else:
+            prefix = label
+
+    final_suffix = parent_folder or suffix
+    if prefix and final_suffix:
+        return f"{prefix} : {final_suffix}"
+    return label or final_suffix
 
 
 @dataclass
@@ -76,11 +116,14 @@ class IngestionOrchestrator:
         self.dry_run = dry_run
         self.site_name = site_name
         self.namespace = site_name if site_name and site_name != "default" else None
-        self.db_namespace = self.namespace or "default"
+        self.namespace_override = os.getenv("RAG_NAMESPACE_OVERRIDE", "").strip() or None
+        self.db_namespace = self.namespace_override or self.namespace or "default"
         self.errors = []
         self.start_time = datetime.now(timezone.utc)
         self._sp_client = None  # Lazy-initialized SharePoint client
         self._url_content_hashes: Dict[str, bytes] = {}  # document_id → hash of raw scraped text
+        self._tracker_metadata: Dict[str, Dict[str, str]] = {}
+        self._source_uri_to_document_id: Dict[str, str] = {}
 
     def _get_sp_client(self) -> SharePointGraphClient:
         """Lazy-initialize SharePoint client for file downloads."""
@@ -125,12 +168,13 @@ class IngestionOrchestrator:
                 logger.info(f"Fetching content from all sources (SharePoint files modified since {modified_since})...")
             else:
                 logger.info("Fetching content from all sources...")
-            sharepoint_items, external_urls = self._fetch_content(modified_since=modified_since)
+            sharepoint_pages, sharepoint_files, external_urls = self._fetch_content(modified_since=modified_since)
 
             # Step 2: Delta detection - identify changed/new documents
             logger.info("Performing delta detection...")
             documents_to_process = self._detect_changes(
-                sharepoint_items,
+                sharepoint_pages,
+                sharepoint_files,
                 external_urls,
                 force_reprocess=force_reprocess,
                 filter_ids=document_ids,
@@ -145,7 +189,7 @@ class IngestionOrchestrator:
                     run_id=f"ingest_{datetime.now(timezone.utc).strftime('%Y-%m-%dT%H-%M-%SZ')}",
                     documents_processed=0,
                     sections_ingested=0,
-                    documents_skipped=len(sharepoint_items) + len(external_urls),
+                    documents_skipped=len(sharepoint_pages) + len(sharepoint_files) + len(external_urls),
                     documents_failed=0,
                 )
 
@@ -158,7 +202,7 @@ class IngestionOrchestrator:
                     run_id=f"ingest_dry_{datetime.now(timezone.utc).strftime('%Y-%m-%dT%H-%M-%SZ')}",
                     documents_processed=0,
                     sections_ingested=0,
-                    documents_skipped=len(sharepoint_items) + len(external_urls) - len(documents_to_process),
+                    documents_skipped=len(sharepoint_pages) + len(sharepoint_files) + len(external_urls) - len(documents_to_process),
                     documents_failed=0,
                 )
 
@@ -205,7 +249,10 @@ class IngestionOrchestrator:
                 documents_failed=0,
             )
 
-    def _fetch_content(self, modified_since: Optional[datetime] = None) -> Tuple[List[SharePointPage], List[str]]:
+    def _fetch_content(
+        self,
+        modified_since: Optional[datetime] = None,
+    ) -> Tuple[List[SharePointPage], List[SharePointFile], List[str]]:
         """Fetch content from all sources.
         
         Args:
@@ -220,11 +267,12 @@ class IngestionOrchestrator:
                 "type": "content_fetch_error",
                 "message": str(e),
             })
-            return [], []
+            return [], [], []
 
     def _detect_changes(
         self,
         sharepoint_pages: List[SharePointPage],
+        sharepoint_files: List[SharePointFile],
         external_urls: List[str],
         force_reprocess: bool = False,
         filter_ids: Optional[List[str]] = None,
@@ -235,6 +283,9 @@ class IngestionOrchestrator:
         For SharePoint pages: uses lastModifiedDateTime from Graph API —
         if the page was modified after our last processing, queue it. No download
         or hashing needed; the Graph API timestamp is authoritative.
+
+        For SharePoint files: uses lastModifiedDateTime and last_processed_at to
+        skip unchanged files when available.
 
         For external URLs: scrapes page → hashes text → compares to DB.
         No "last modified" metadata available, so hash is the only option.
@@ -261,6 +312,48 @@ class IngestionOrchestrator:
                 "page_id": sp_page.page_id,
                 "date_modified": sp_page.last_modified,
             })
+            if sp_page.url:
+                self._source_uri_to_document_id[sp_page.url] = document_id
+            self._update_last_seen(document_id)
+
+        # --- SharePoint files (document libraries) ---
+        for sp_file in sharepoint_files:
+            if not sp_file.download_url:
+                logger.warning(f"Skipping file without download URL: {sp_file.file_name}")
+                continue
+            document_id = DocumentIngestionState.generate_document_id(
+                title=sp_file.file_name,
+                url=sp_file.url,
+            )
+
+            if filter_ids and document_id not in filter_ids:
+                continue
+
+            if not force_reprocess and sp_file.last_modified:
+                existing = self.db.query(DocumentIngestionState).filter(
+                    DocumentIngestionState.document_id == document_id,
+                    DocumentIngestionState.rag_namespace == self.db_namespace,
+                ).first()
+
+                if existing and existing.last_processed_at and sp_file.last_modified <= existing.last_processed_at:
+                    self._update_last_seen(document_id)
+                    continue
+
+            documents_to_process.append({
+                "document_id": document_id,
+                "source_type": "sharepoint_file",
+                "source_uri": sp_file.url,
+                "file_name": sp_file.file_name,
+                "download_url": sp_file.download_url,
+                "date_modified": sp_file.last_modified,
+                "library_name": sp_file.library_name,
+            })
+            if sp_file.url:
+                self._source_uri_to_document_id[sp_file.url] = document_id
+            self._tracker_metadata[document_id] = {
+                "content_section": _build_content_section(sp_file.library_name, sp_file.parent_path) or "",
+                "document_title": sp_file.file_name,
+            }
             self._update_last_seen(document_id)
 
         # --- External URLs ---
@@ -313,6 +406,7 @@ class IngestionOrchestrator:
                     # Cached scraped text — avoids re-scraping in _process_documents
                     "_cached_text": scraped_text,
                 })
+                self._source_uri_to_document_id[url] = document_id
 
             self._update_last_seen(document_id)
 
@@ -379,17 +473,23 @@ class IngestionOrchestrator:
         run_id = f"ingest_{datetime.now(timezone.utc).strftime('%Y-%m-%dT%H-%M-%SZ')}"
         start_time = datetime.now(timezone.utc)
 
-        sp_docs = [d for d in documents_to_process if d["source_type"] == "sharepoint_page"]
+        sp_page_docs = [d for d in documents_to_process if d["source_type"] == "sharepoint_page"]
+        sp_file_docs = [d for d in documents_to_process if d["source_type"] == "sharepoint_file"]
         url_docs = [d for d in documents_to_process if d["source_type"] == "url"]
 
         all_documents = []
 
         # --- Path A: SharePoint pages (site pages) ---
-        if sp_docs:
-            sp_documents = self._process_sharepoint_pages(sp_docs)
+        if sp_page_docs:
+            sp_documents = self._process_sharepoint_pages(sp_page_docs)
             all_documents.extend(sp_documents)
 
-        # --- Path B: External URLs (run_pipeline) ---
+        # --- Path B: SharePoint files (document libraries) ---
+        if sp_file_docs:
+            sp_documents = self._process_sharepoint_files(sp_file_docs)
+            all_documents.extend(sp_documents)
+
+        # --- Path C: External URLs (run_pipeline) ---
         if url_docs:
             url_documents = self._process_urls(url_docs, run_id)
             all_documents.extend(url_documents)
@@ -465,6 +565,7 @@ class IngestionOrchestrator:
             if not extracted_text:
                 logger.warning(f"No extracted text for {file_name}, skipping")
                 documents.append({
+                    "document_id": doc.get("document_id"),
                     "uri": doc["source_uri"],
                     "source_type": "sharepoint",
                     "cached_files": {},
@@ -491,6 +592,7 @@ class IngestionOrchestrator:
                 logger.info(f"Processed {file_name}: {len(sections)} sections")
 
                 documents.append({
+                    "document_id": doc.get("document_id"),
                     "uri": doc["source_uri"],
                     "source_type": "sharepoint",
                     "cached_files": {"raw_text": txt_path},
@@ -507,6 +609,7 @@ class IngestionOrchestrator:
                     "message": str(e),
                 })
                 documents.append({
+                    "document_id": doc.get("document_id"),
                     "uri": doc["source_uri"],
                     "source_type": "sharepoint",
                     "cached_files": {},
@@ -539,6 +642,7 @@ class IngestionOrchestrator:
             if not page_id:
                 logger.warning(f"No page_id for {page_title}, skipping")
                 documents.append({
+                    "document_id": doc.get("document_id"),
                     "uri": source_uri,
                     "source_type": "sharepoint_page",
                     "cached_files": {},
@@ -555,6 +659,7 @@ class IngestionOrchestrator:
                 if not extracted_text:
                     logger.warning(f"No content extracted for {page_title}, skipping")
                     documents.append({
+                        "document_id": doc.get("document_id"),
                         "uri": source_uri,
                         "source_type": "sharepoint_page",
                         "cached_files": {},
@@ -583,6 +688,7 @@ class IngestionOrchestrator:
                 logger.info(f"Processed page '{page_title}': {len(sections)} sections")
 
                 documents.append({
+                    "document_id": doc.get("document_id"),
                     "uri": source_uri,
                     "source_type": "sharepoint_page",
                     "cached_files": {"raw_text": txt_path},
@@ -599,6 +705,7 @@ class IngestionOrchestrator:
                     "message": str(e),
                 })
                 documents.append({
+                    "document_id": doc.get("document_id"),
                     "uri": source_uri,
                     "source_type": "sharepoint_page",
                     "cached_files": {},
@@ -617,6 +724,7 @@ class IngestionOrchestrator:
         but falls back to run_pipeline for the full AI extraction flow.
         """
         urls = [doc["source_uri"] for doc in url_docs]
+        url_id_map = {doc["source_uri"]: doc.get("document_id") for doc in url_docs}
 
         if not urls:
             return []
@@ -639,6 +747,7 @@ class IngestionOrchestrator:
             normalized_docs = []
             for doc in pipeline_output.get("documents", []):
                 normalized_doc = {
+                    "document_id": url_id_map.get(doc.get("source", {}).get("uri", doc.get("uri", ""))),
                     "uri": doc.get("source", {}).get("uri", doc.get("uri", "")),
                     "source_type": doc.get("source_type", "webpage"),
                     "cached_files": doc.get("cached_files", {}),
@@ -687,11 +796,12 @@ class IngestionOrchestrator:
 
             logger.info(f"Ingesting {len(sections)} section(s) from {doc_id}")
 
-            # Generate document_id for database lookup
-            document_id = DocumentIngestionState.generate_document_id(
-                title=source_uri,
-                url=source_uri,
-            )
+            document_id = self._source_uri_to_document_id.get(source_uri) or doc.get("document_id")
+            if not document_id:
+                document_id = DocumentIngestionState.generate_document_id(
+                    title=source_uri,
+                    url=source_uri,
+                )
 
             # Get or create database record
             db_record = self.db.query(DocumentIngestionState).filter(
@@ -761,7 +871,7 @@ class IngestionOrchestrator:
                             "source_uri": source_uri,
                             "section_hash": section["section_hash"],
                         },
-                        namespace=self.namespace,
+                        namespace=self.db_namespace if self.db_namespace else None,
                     )
 
                     vector_id = result.get("vector_id")
@@ -770,9 +880,8 @@ class IngestionOrchestrator:
                     # Keep first vector_id as representative (backward compat)
                     if sections_succeeded == 0:
                         db_record.rag_vector_id = vector_id
-                        result_namespace = result.get("namespace") or self.db_namespace
-                        if result_namespace:
-                            db_record.rag_namespace = result_namespace
+                        if not db_record.rag_namespace:
+                            db_record.rag_namespace = self.db_namespace
 
                     sections_succeeded += 1
                     stats["sections_ingested"] += 1
@@ -798,12 +907,29 @@ class IngestionOrchestrator:
                 # Update SharePoint tracker list
                 doc_title = source_uri.split("/")[-1] if source_uri else doc_id
                 try:
+                    tracker_meta = self._tracker_metadata.get(document_id)
+                    content_section = None
+                    document_title = None
+                    summary_notes = None
+                    ingestion_date = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+                    increment_version = False
+
+                    if tracker_meta:
+                        content_section = tracker_meta.get("content_section") or None
+                        document_title = tracker_meta.get("document_title") or doc_title
+                        summary_notes = "\n".join(doc.get("errors", [])) if doc.get("errors") else "Ingested successfully"
+                        increment_version = True
                     vector_id = new_vector_ids[0] if new_vector_ids else None
                     update_tracker_list(
                         title=doc_title,
                         url=source_uri,
                         vector_id=vector_id,
                         site_name=self.site_name,
+                        content_section=content_section,
+                        document_title=document_title,
+                        summary=summary_notes,
+                        ingestion_date=ingestion_date,
+                        increment_version=increment_version,
                     )
                 except Exception as e:
                     logger.warning(f"Failed to update tracker list: {e}")

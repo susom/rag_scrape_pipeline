@@ -159,7 +159,7 @@ Edit `content_fetcher.py` line ~120-130 (the `content=` field)
 
 **Add more test items:**
 ```python
-return [test_doc, test_doc2], [url1, url2, url3]
+return [test_doc, test_doc2], [], [url1, url2, url3]
 ```
 
 ## Cleanup After Testing
@@ -169,7 +169,7 @@ Once SharePoint integration is ready, revert stub:
 ```python
 def fetch_content_sources_stub():
     logger.warning("Using stub content fetcher - returning empty lists")
-    return [], []
+    return [], [], []
 ```
 
 And switch orchestrator to use real fetcher:

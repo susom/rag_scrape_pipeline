@@ -186,16 +186,15 @@ def test_content_fetcher_stub():
     from rag_pipeline.automation.content_fetcher import fetch_content_sources_stub
 
     # Call stub function
-    sharepoint_docs, external_urls = fetch_content_sources_stub()
+    sharepoint_pages, sharepoint_files, external_urls = fetch_content_sources_stub()
 
     # Verify returns test data (stub provides sample items for manual testing)
-    assert len(sharepoint_docs) >= 1
+    assert len(sharepoint_files) >= 1
     assert len(external_urls) >= 1
 
     # Verify SharePointItem fields
-    item = sharepoint_docs[0]
-    assert item.name is not None
-    assert item.item_type == "file"
+    item = sharepoint_files[0]
+    assert item.file_name is not None
 
     print("✅ Content fetcher stub returns test data")
 
