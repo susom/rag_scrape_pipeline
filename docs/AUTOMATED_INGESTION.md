@@ -141,6 +141,7 @@ SHAREPOINT_SITE_PATH=/sites/<site>
 # Optional per-site overrides:
 SHAREPOINT_SITE_<NAME>_CONTENT_SOURCE=site_pages|document_library
 SHAREPOINT_SITE_<NAME>_LIBRARY_PREFIXES="Library 1,Library 2"
+SHAREPOINT_SITE_<NAME>_LIBRARY_DRIVE_IDS="b!driveid1,b!driveid2"
 SHAREPOINT_SITE_<NAME>_EXTERNAL_URLS_PAGE_ID=<page_id>  # for site pages mode
 SHAREPOINT_SITE_<NAME>_EXTERNAL_URLS_DRIVE=<drive name>
 SHAREPOINT_SITE_<NAME>_EXTERNAL_URLS_FILE=<file name>

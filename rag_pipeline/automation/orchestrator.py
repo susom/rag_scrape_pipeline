@@ -49,6 +49,8 @@ def _normalize_library_label(library_name: Optional[str]) -> Optional[str]:
     label = library_name.strip()
     if label.lower().endswith(" library"):
         label = label[:-len(" library")].rstrip()
+    if label.lower().endswith(" document"):
+        label = f"{label[:-len(' document')].rstrip()} Documents"
     return re.sub(r"\s*:\s*", " : ", label)
 
 
@@ -79,6 +81,14 @@ def _build_content_section(library_name: Optional[str], parent_path: Optional[st
     if prefix and final_suffix:
         return f"{prefix} : {final_suffix}"
     return label or final_suffix
+
+
+def _format_timestamp(value: Optional[datetime]) -> Optional[str]:
+    if not value:
+        return None
+    if value.tzinfo is None:
+        value = value.replace(tzinfo=timezone.utc)
+    return value.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
 
 
 @dataclass
@@ -353,6 +363,11 @@ class IngestionOrchestrator:
             self._tracker_metadata[document_id] = {
                 "content_section": _build_content_section(sp_file.library_name, sp_file.parent_path) or "",
                 "document_title": sp_file.file_name,
+                "document_modified": _format_timestamp(sp_file.last_modified),
+                "document_modified_by": sp_file.modified_by,
+                "document_created": _format_timestamp(sp_file.created_at),
+                "approver": sp_file.approver,
+                "modified_by": sp_file.modified_by,
             }
             self._update_last_seen(document_id)
 
@@ -910,6 +925,11 @@ class IngestionOrchestrator:
                     tracker_meta = self._tracker_metadata.get(document_id)
                     content_section = None
                     document_title = None
+                    modified_by = None
+                    document_modified = None
+                    document_modified_by = None
+                    document_created = None
+                    approver = None
                     summary_notes = None
                     ingestion_date = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
                     increment_version = False
@@ -917,6 +937,11 @@ class IngestionOrchestrator:
                     if tracker_meta:
                         content_section = tracker_meta.get("content_section") or None
                         document_title = tracker_meta.get("document_title") or doc_title
+                        modified_by = tracker_meta.get("modified_by") or None
+                        document_modified = tracker_meta.get("document_modified") or None
+                        document_modified_by = tracker_meta.get("document_modified_by") or None
+                        document_created = tracker_meta.get("document_created") or None
+                        approver = tracker_meta.get("approver") or None
                         summary_notes = "\n".join(doc.get("errors", [])) if doc.get("errors") else "Ingested successfully"
                         increment_version = True
                     vector_id = new_vector_ids[0] if new_vector_ids else None
@@ -927,6 +952,11 @@ class IngestionOrchestrator:
                         site_name=self.site_name,
                         content_section=content_section,
                         document_title=document_title,
+                        modified_by=modified_by,
+                        document_modified=document_modified,
+                        document_modified_by=document_modified_by,
+                        document_created=document_created,
+                        approver=approver,
                         summary=summary_notes,
                         ingestion_date=ingestion_date,
                         increment_version=increment_version,

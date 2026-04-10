@@ -9,6 +9,8 @@ Coordinates fetching from:
 
 import os
 import re
+import html
+import requests
 from typing import List, Tuple, Optional, Dict, Any, Iterable
 from datetime import datetime, timezone
 from dataclasses import dataclass
@@ -41,7 +43,11 @@ class SharePointFile:
     file_name: str
     url: str
     download_url: Optional[str]
-    last_modified: Optional[datetime]
+    created_at: Optional[datetime] = None
+    last_modified: Optional[datetime] = None
+    modified_by: Optional[str] = None
+    created_by: Optional[str] = None
+    approver: Optional[str] = None
     library_name: Optional[str] = None
     parent_path: Optional[str] = None
     list_item_fields: Optional[dict] = None
@@ -121,6 +127,32 @@ def _is_item_approved(fields: Optional[dict], approval_field: Optional[str]) -> 
             return _is_approval_value_approved(value, key)
 
     return False
+
+
+def _extract_approver_name(fields: Optional[dict]) -> Optional[str]:
+    if not fields:
+        return None
+
+    candidates = [
+        "_ApprovalRespondedBy",
+        "ApprovalRespondedBy",
+        "_ApprovalAssignedTo",
+        "ApprovalAssignedTo",
+    ]
+    for key in candidates:
+        value = fields.get(key)
+        if not value:
+            continue
+        if isinstance(value, list) and value:
+            entry = value[0]
+            if isinstance(entry, dict):
+                return entry.get("LookupValue") or entry.get("displayName") or entry.get("Email")
+            return str(entry)
+        if isinstance(value, dict):
+            return value.get("LookupValue") or value.get("displayName") or value.get("Email")
+        return str(value)
+
+    return None
 
 
 def _fetch_external_urls_file(
@@ -303,10 +335,20 @@ def fetch_content_sources(
         elif content_source == "document_library":
             library_prefixes = site_config.library_prefixes or _default_library_prefixes()
             drives = list(client.get_drives())
-            allowed_drives = [drive for drive in drives if _library_matches(drive.get("name", ""), library_prefixes)]
+            library_drive_ids = site_config.library_drive_ids or []
+            if library_drive_ids:
+                allowed_drives = [drive for drive in drives if drive.get("id") in library_drive_ids]
+                missing = [drive_id for drive_id in library_drive_ids if drive_id not in {d.get("id") for d in allowed_drives}]
+                if missing:
+                    logger.warning(f"Configured drive IDs not found: {missing}")
+            else:
+                allowed_drives = [drive for drive in drives if _library_matches(drive.get("name", ""), library_prefixes)]
 
             if not allowed_drives:
-                logger.warning("No document libraries matched configured prefixes")
+                if library_drive_ids:
+                    logger.warning("No document libraries matched configured drive IDs")
+                else:
+                    logger.warning("No document libraries matched configured prefixes")
             else:
                 logger.info(f"Matched {len(allowed_drives)} document libraries for processing")
 
@@ -332,7 +374,11 @@ def fetch_content_sources(
                         file_name=item.name,
                         url=item.url,
                         download_url=item.download_url,
+                        created_at=item.created_at,
                         last_modified=item.last_modified,
+                        modified_by=item.last_modified_by,
+                        created_by=item.created_by,
+                        approver=_extract_approver_name(item.list_item_fields),
                         library_name=item.library_name,
                         parent_path=item.parent_path,
                         list_item_fields=item.list_item_fields,
@@ -384,6 +430,12 @@ def _resolve_tracker_field_names(
     display_names = {
         "content_section": "Content Section",
         "document_title": "Document Title",
+        "document_link": "Document Link",
+        "modified_by": "Modify By",
+        "document_modified": "Document Modified",
+        "document_modified_by": "Document Modified By",
+        "document_created": "Document Created",
+        "approver": "Approver",
         "version": "RExI Version",
         "summary": "Summary",
         "ingestion_date": "Ingestion Date",
@@ -395,6 +447,12 @@ def _resolve_tracker_field_names(
         overrides = {
             "content_section": os.getenv(f"{prefix}CONTENT_SECTION", "").strip() or None,
             "document_title": os.getenv(f"{prefix}DOCUMENT_TITLE", "").strip() or None,
+            "document_link": os.getenv(f"{prefix}DOCUMENT_LINK", "").strip() or None,
+            "modified_by": os.getenv(f"{prefix}MODIFIED_BY", "").strip() or None,
+            "document_modified": os.getenv(f"{prefix}DOCUMENT_MODIFIED", "").strip() or None,
+            "document_modified_by": os.getenv(f"{prefix}DOCUMENT_MODIFIED_BY", "").strip() or None,
+            "document_created": os.getenv(f"{prefix}DOCUMENT_CREATED", "").strip() or None,
+            "approver": os.getenv(f"{prefix}APPROVER", "").strip() or None,
             "version": os.getenv(f"{prefix}VERSION", "").strip() or None,
             "summary": os.getenv(f"{prefix}SUMMARY", "").strip() or None,
             "ingestion_date": os.getenv(f"{prefix}INGESTION_DATE", "").strip() or None,
@@ -411,6 +469,12 @@ def _resolve_tracker_field_names(
     fallback_internal = {
         "content_section": ["LinkTitle", "ContentSectionHeader"],
         "document_title": ["Content", "DocumentTitle", "Title"],
+        "document_link": ["DocumentLink", "Document_x0020_Link", "Link", "Url", "URL"],
+        "modified_by": ["ModifyBy", "Modify_x0020_By"],
+        "document_modified": ["DocumentModified", "Document_x0020_Modified"],
+        "document_modified_by": ["DocumentModifiedBy", "Document_x0020_Modified_x0020_By"],
+        "document_created": ["DocumentCreated", "Document_x0020_Created"],
+        "approver": ["Approver"],
         "version": ["RExIVersion"],
         "summary": ["Summary"],
         "ingestion_date": ["IngestionDate"],
@@ -431,6 +495,16 @@ def _resolve_tracker_field_names(
     if resolved.get("content_section") in {"LinkTitle", "LinkTitleNoMenu"} and "Title" in internal_names:
         resolved["content_section"] = "Title"
 
+    title_field = resolved.get("document_title")
+    title_is_rich = False
+    if title_field:
+        for col in columns:
+            if col.get("name") == title_field:
+                text_info = col.get("text") or {}
+                title_is_rich = text_info.get("textType") == "richText"
+                break
+    resolved["document_title_is_rich_text"] = title_is_rich
+
     return resolved
 
 
@@ -441,6 +515,12 @@ def update_tracker_list(
     site_name: Optional[str] = None,
     content_section: Optional[str] = None,
     document_title: Optional[str] = None,
+    document_link_text: Optional[str] = "Go to Page",
+    modified_by: Optional[str] = None,
+    document_modified: Optional[str] = None,
+    document_modified_by: Optional[str] = None,
+    document_created: Optional[str] = None,
+    approver: Optional[str] = None,
     summary: Optional[str] = None,
     ingestion_date: Optional[str] = None,
     increment_version: bool = False,
@@ -495,6 +575,12 @@ def update_tracker_list(
         use_rich_fields = any([
             content_section,
             document_title,
+            url,
+            modified_by,
+            document_modified,
+            document_modified_by,
+            document_created,
+            approver,
             summary is not None,
             ingestion_date is not None,
             increment_version,
@@ -511,8 +597,19 @@ def update_tracker_list(
 
         field_names = _resolve_tracker_field_names(client, tracker_list_id, site_name)
         fields_to_set: Dict[str, Any] = {}
+        link_field_name = field_names.get("document_link")
 
-        doc_title_value = document_title or title
+        doc_title_raw = document_title or title
+        title_is_rich = bool(field_names.get("document_title_is_rich_text"))
+        doc_title_value = doc_title_raw
+        doc_title_html = None
+        if title_is_rich and url:
+            doc_title_html = (
+                f"<a href=\"{html.escape(url, quote=True)}\">"
+                f"{html.escape(doc_title_raw or '', quote=True)}</a>"
+            )
+            doc_title_value = doc_title_html
+
         if field_names.get("document_title"):
             fields_to_set[field_names["document_title"]] = doc_title_value
         else:
@@ -521,6 +618,23 @@ def update_tracker_list(
         if content_section and field_names.get("content_section"):
             fields_to_set[field_names["content_section"]] = content_section
 
+        if modified_by and field_names.get("modified_by"):
+            fields_to_set[field_names["modified_by"]] = modified_by
+        if document_modified and field_names.get("document_modified"):
+            fields_to_set[field_names["document_modified"]] = document_modified
+        if document_modified_by and field_names.get("document_modified_by"):
+            fields_to_set[field_names["document_modified_by"]] = document_modified_by
+        if document_created and field_names.get("document_created"):
+            fields_to_set[field_names["document_created"]] = document_created
+        if approver and field_names.get("approver"):
+            fields_to_set[field_names["approver"]] = approver
+
+        if url and link_field_name and not title_is_rich:
+            fields_to_set[link_field_name] = {
+                "Url": url,
+                "Description": document_link_text or "Go to Page",
+            }
+
         if summary is not None and field_names.get("summary"):
             fields_to_set[field_names["summary"]] = summary
 
@@ -528,8 +642,8 @@ def update_tracker_list(
             fields_to_set[field_names["ingestion_date"]] = ingestion_date
 
         existing_item = None
-        if doc_title_value and field_names.get("document_title"):
-            filter_query = f"fields/{field_names['document_title']} eq '{_escape_odata_value(doc_title_value)}'"
+        if doc_title_raw and field_names.get("document_title"):
+            filter_query = f"fields/{field_names['document_title']} eq '{_escape_odata_value(doc_title_raw)}'"
             if content_section and field_names.get("content_section"):
                 filter_query += f" and fields/{field_names['content_section']} eq '{_escape_odata_value(content_section)}'"
             try:
@@ -544,7 +658,7 @@ def update_tracker_list(
                 existing_item = None
 
             if not existing_item and content_section and field_names.get("content_section"):
-                fallback_filter = f"fields/{field_names['document_title']} eq '{_escape_odata_value(doc_title_value)}'"
+                fallback_filter = f"fields/{field_names['document_title']} eq '{_escape_odata_value(doc_title_raw)}'"
                 try:
                     fallback_items = list(client.get_list_items(
                         list_id=tracker_list_id,
@@ -556,6 +670,19 @@ def update_tracker_list(
                 except Exception as e:
                     logger.warning(f"Tracker fallback lookup failed, will create new entry: {e}")
 
+            if not existing_item and doc_title_html:
+                html_filter = f"fields/{field_names['document_title']} eq '{_escape_odata_value(doc_title_html)}'"
+                try:
+                    html_items = list(client.get_list_items(
+                        list_id=tracker_list_id,
+                        max_items=2,
+                        filter_query=html_filter,
+                    ))
+                    if len(html_items) == 1:
+                        existing_item = html_items[0]
+                except Exception as e:
+                    logger.warning(f"Tracker HTML lookup failed, will create new entry: {e}")
+
         if existing_item:
             current_fields = existing_item.get("fields", {})
             if increment_version and field_names.get("version"):
@@ -563,21 +690,46 @@ def update_tracker_list(
                     current_fields.get(field_names["version"])
                 ))
 
-            client.update_list_item_fields(
-                list_id=tracker_list_id,
-                item_id=existing_item.get("id"),
-                fields=fields_to_set,
-            )
+            try:
+                client.update_list_item_fields(
+                    list_id=tracker_list_id,
+                    item_id=existing_item.get("id"),
+                    fields=fields_to_set,
+                )
+            except requests.exceptions.HTTPError as e:
+                if link_field_name and link_field_name in fields_to_set and e.response is not None and e.response.status_code == 400:
+                    logger.warning("Document Link update failed (400). Retrying without Document Link.")
+                    fields_to_set = {key: value for key, value in fields_to_set.items() if key != link_field_name}
+                    if fields_to_set:
+                        client.update_list_item_fields(
+                            list_id=tracker_list_id,
+                            item_id=existing_item.get("id"),
+                            fields=fields_to_set,
+                        )
+                else:
+                    raise
             logger.info(f"Updated tracker entry: {doc_title_value}")
             return True
 
         if increment_version and field_names.get("version"):
             fields_to_set[field_names["version"]] = "1"
 
-        client.add_list_item(
-            list_id=tracker_list_id,
-            fields=fields_to_set,
-        )
+        try:
+            client.add_list_item(
+                list_id=tracker_list_id,
+                fields=fields_to_set,
+            )
+        except requests.exceptions.HTTPError as e:
+            if link_field_name and link_field_name in fields_to_set and e.response is not None and e.response.status_code == 400:
+                logger.warning("Document Link update failed (400). Retrying without Document Link.")
+                fields_to_set = {key: value for key, value in fields_to_set.items() if key != link_field_name}
+                if fields_to_set:
+                    client.add_list_item(
+                        list_id=tracker_list_id,
+                        fields=fields_to_set,
+                    )
+            else:
+                raise
         logger.info(f"Added tracker entry: {doc_title_value}")
         return True
 

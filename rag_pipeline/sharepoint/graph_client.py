@@ -43,8 +43,10 @@ class SharePointItem:
     download_url: Optional[str] = None  # @microsoft.graph.downloadUrl (files only)
     mime_type: Optional[str] = None  # Files only
     size: Optional[int] = None  # Files only
+    created_at: Optional[datetime] = None
     last_modified: Optional[datetime] = None
     created_by: Optional[str] = None
+    last_modified_by: Optional[str] = None
     library_name: Optional[str] = None
     parent_path: Optional[str] = None
     list_item_fields: Optional[dict] = None
@@ -1083,6 +1085,14 @@ class SharePointGraphClient:
                 except (ValueError, AttributeError):
                     pass
 
+            created_at = None
+            created_at_str = item.get("createdDateTime")
+            if created_at_str:
+                try:
+                    created_at = datetime.fromisoformat(created_at_str.replace("Z", "+00:00"))
+                except (ValueError, AttributeError):
+                    pass
+
             # Client-side date filter
             if modified_since and last_modified:
                 if last_modified < modified_since:
@@ -1092,6 +1102,20 @@ class SharePointGraphClient:
             if include_fields:
                 list_item_fields = item.get("listItem", {}).get("fields", {})
 
+            last_modified_by = None
+            last_modified_info = item.get("lastModifiedBy") or {}
+            if last_modified_info.get("user"):
+                last_modified_by = last_modified_info["user"].get("displayName")
+            elif last_modified_info.get("application"):
+                last_modified_by = last_modified_info["application"].get("displayName")
+
+            created_by = None
+            created_info = item.get("createdBy") or {}
+            if created_info.get("user"):
+                created_by = created_info["user"].get("displayName")
+            elif created_info.get("application"):
+                created_by = created_info["application"].get("displayName")
+
             manifest.append(SharePointItem(
                 sharepoint_id=item.get("id", ""),
                 name=name,
@@ -1100,7 +1124,10 @@ class SharePointGraphClient:
                 download_url=item.get("@microsoft.graph.downloadUrl"),
                 mime_type=item.get("file", {}).get("mimeType"),
                 size=item.get("size"),
+                created_at=created_at,
                 last_modified=last_modified,
+                created_by=created_by,
+                last_modified_by=last_modified_by,
                 library_name=library_name,
                 parent_path=(item.get("parentReference") or {}).get("path"),
                 list_item_fields=list_item_fields,

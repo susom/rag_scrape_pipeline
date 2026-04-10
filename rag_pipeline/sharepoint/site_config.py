@@ -12,7 +12,8 @@ Credentials per site (optional — falls back to global SHAREPOINT_* vars / Secr
 
 Content source configuration:
 - SHAREPOINT_SITE_{NAME}_CONTENT_SOURCE: "site_pages" (default) or "document_library"
-- SHAREPOINT_SITE_{NAME}_LIBRARY_PREFIXES: Comma-separated library name prefixes (e.g., "Library 1,Library 2")
+    - SHAREPOINT_SITE_{NAME}_LIBRARY_PREFIXES: Comma-separated library name prefixes (e.g., "Library 1,Library 2")
+    - SHAREPOINT_SITE_{NAME}_LIBRARY_DRIVE_IDS: Comma-separated document library drive IDs (stable identifiers)
 - SHAREPOINT_SITE_{NAME}_EXTERNAL_URLS_DRIVE: Optional drive name for external URLs file
 - SHAREPOINT_SITE_{NAME}_EXTERNAL_URLS_FILE: Optional external URLs file name
 - SHAREPOINT_SITE_{NAME}_APPROVAL_FIELD: Optional list field name for approval status
@@ -46,6 +47,7 @@ class SiteConfig:
     path: str
     content_source: str = "site_pages"
     library_prefixes: Optional[List[str]] = None
+    library_drive_ids: Optional[List[str]] = None
     external_urls_drive: Optional[str] = None
     external_urls_file: Optional[str] = None
     approval_field: Optional[str] = None
@@ -89,6 +91,7 @@ class SiteConfigManager:
         default_path = os.getenv("SHAREPOINT_SITE_PATH", "").strip()
         default_content_source = os.getenv("SHAREPOINT_SITE_CONTENT_SOURCE", "site_pages").strip() or "site_pages"
         default_library_prefixes = self._parse_csv(os.getenv("SHAREPOINT_SITE_LIBRARY_PREFIXES", ""))
+        default_library_drive_ids = self._parse_csv(os.getenv("SHAREPOINT_SITE_LIBRARY_DRIVE_IDS", ""))
         default_external_urls_drive = os.getenv("SHAREPOINT_SITE_EXTERNAL_URLS_DRIVE", "").strip() or None
         default_external_urls_file = os.getenv("SHAREPOINT_SITE_EXTERNAL_URLS_FILE", "").strip() or None
         default_approval_field = os.getenv("SHAREPOINT_SITE_APPROVAL_FIELD", "").strip() or None
@@ -100,6 +103,7 @@ class SiteConfigManager:
                 path=default_path,
                 content_source=default_content_source.lower(),
                 library_prefixes=default_library_prefixes or None,
+                library_drive_ids=default_library_drive_ids or None,
                 external_urls_drive=default_external_urls_drive,
                 external_urls_file=default_external_urls_file,
                 approval_field=default_approval_field,
@@ -123,6 +127,9 @@ class SiteConfigManager:
                     library_prefixes = self._parse_csv(
                         os.getenv(f"SHAREPOINT_SITE_{site_name}_LIBRARY_PREFIXES", "")
                     )
+                    library_drive_ids = self._parse_csv(
+                        os.getenv(f"SHAREPOINT_SITE_{site_name}_LIBRARY_DRIVE_IDS", "")
+                    )
                     external_urls_drive = os.getenv(
                         f"SHAREPOINT_SITE_{site_name}_EXTERNAL_URLS_DRIVE", ""
                     ).strip() or None
@@ -144,6 +151,7 @@ class SiteConfigManager:
                             client_secret=os.getenv(f"SHAREPOINT_SITE_{site_name}_CLIENT_SECRET", "").strip() or None,
                             content_source=content_source.lower(),
                             library_prefixes=library_prefixes or None,
+                            library_drive_ids=library_drive_ids or None,
                             external_urls_drive=external_urls_drive,
                             external_urls_file=external_urls_file,
                             approval_field=approval_field,

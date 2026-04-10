@@ -246,6 +246,7 @@ Schema version: `rpp.v1`
 | `SHAREPOINT_URLS_PAGE_ID` | No | SharePoint page ID for external URLs (site pages mode) |
 | `SHAREPOINT_SITE_CONTENT_SOURCE` | No | `site_pages` or `document_library` (default: `site_pages`) |
 | `SHAREPOINT_SITE_LIBRARY_PREFIXES` | No | Comma-separated library prefixes (document library mode) |
+| `SHAREPOINT_SITE_LIBRARY_DRIVE_IDS` | No | Comma-separated SharePoint document library drive IDs (stable identifiers) |
 | `SHAREPOINT_SITE_EXTERNAL_URLS_DRIVE` | No | Drive name for external URLs file |
 | `SHAREPOINT_SITE_EXTERNAL_URLS_FILE` | No | External URLs file name |
 | `SHAREPOINT_SITE_APPROVAL_FIELD` | No | Optional approval field override |
@@ -376,6 +377,7 @@ The pipeline fetches content from SharePoint and ingests it into the RAG vector 
 **Per-site Content Source Configuration:**
 - `SHAREPOINT_SITE_{NAME}_CONTENT_SOURCE`: `site_pages` (default) or `document_library`
 - `SHAREPOINT_SITE_{NAME}_LIBRARY_PREFIXES`: Comma-separated library name prefixes (e.g., `Library 1,Library 2`)
+- `SHAREPOINT_SITE_{NAME}_LIBRARY_DRIVE_IDS`: Comma-separated document library drive IDs (stable identifiers)
 - `SHAREPOINT_SITE_{NAME}_EXTERNAL_URLS_DRIVE` / `SHAREPOINT_SITE_{NAME}_EXTERNAL_URLS_FILE`: Optional external URLs file
 - `SHAREPOINT_SITE_{NAME}_APPROVAL_FIELD`: Optional list field name for approval status filtering
 - `SHAREPOINT_SITE_{NAME}_TRACKER_LIST_ID`: Updates list ID for ingestion logging
