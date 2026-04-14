@@ -250,6 +250,7 @@ Schema version: `rpp.v1`
 | `SHAREPOINT_SITE_EXTERNAL_URLS_DRIVE` | No | Drive name for external URLs file |
 | `SHAREPOINT_SITE_EXTERNAL_URLS_FILE` | No | External URLs file name |
 | `SHAREPOINT_SITE_APPROVAL_FIELD` | No | Optional approval field override |
+| `SHAREPOINT_SITE_CONTENT_EDITOR_FIELD` | No | Document library field that stores the last non-approver editor (default: `Last Editor (Draft)`) |
 | `SHAREPOINT_TRACKER_LIST_ID` | No | Tracker list ID for ingestion updates |
 | `SHAREPOINT_TRACKER_LIST_NAME` | No | Tracker list name (ID auto-resolved) |
 | `RAG_NAMESPACE_OVERRIDE` | No | Forces the namespace sent to the RAG EM API and stored in DB |

@@ -43,6 +43,7 @@ class SharePointItem:
     download_url: Optional[str] = None  # @microsoft.graph.downloadUrl (files only)
     mime_type: Optional[str] = None  # Files only
     size: Optional[int] = None  # Files only
+    drive_id: Optional[str] = None
     created_at: Optional[datetime] = None
     last_modified: Optional[datetime] = None
     created_by: Optional[str] = None
@@ -824,6 +825,20 @@ class SharePointGraphClient:
         for drive in self._paginate(url):
             yield drive
 
+    def get_drive_list(self, drive_id: str) -> dict:
+        """
+        Get the list metadata for a drive (document library).
+
+        Args:
+            drive_id: Drive ID
+
+        Returns:
+            List object for the drive
+        """
+        site_id = self.get_site_id()
+        url = f"/sites/{site_id}/drives/{drive_id}/list"
+        return self._make_request("GET", url)
+
     def get_drive_items(
         self,
         drive_id: Optional[str] = None,
@@ -885,6 +900,52 @@ class SharePointGraphClient:
 
                         if max_items and items_yielded >= max_items:
                             return
+
+    def get_drive_item_versions(
+        self,
+        drive_id: str,
+        item_id: str,
+        max_items: Optional[int] = None,
+    ) -> Generator[dict, None, None]:
+        """
+        Get version history for a drive item.
+
+        Args:
+            drive_id: Drive ID
+            item_id: Item ID
+            max_items: Maximum number of versions to return
+
+        Yields:
+            Version objects
+        """
+        site_id = self.get_site_id()
+        url = f"/sites/{site_id}/drives/{drive_id}/items/{item_id}/versions"
+        for version in self._paginate(url, max_items=max_items):
+            yield version
+
+    def get_drive_item_activities(
+        self,
+        drive_id: str,
+        item_id: str,
+        max_items: Optional[int] = None,
+    ) -> Generator[dict, None, None]:
+        """
+        Get activity feed for a drive item (tracks actual edits, not just versions).
+
+        Unlike version history, activities record each edit separately even when
+        minor versions are collapsed by approval workflows.
+
+        Args:
+            drive_id: Drive ID
+            item_id: Item ID
+            max_items: Maximum number of activities to return
+
+        Yields:
+            Activity objects with action, actor, and times fields
+        """
+        url = f"/drives/{drive_id}/items/{item_id}/activities"
+        for activity in self._paginate(url, max_items=max_items):
+            yield activity
 
     def get_file_content(
         self,
@@ -1124,6 +1185,7 @@ class SharePointGraphClient:
                 download_url=item.get("@microsoft.graph.downloadUrl"),
                 mime_type=item.get("file", {}).get("mimeType"),
                 size=item.get("size"),
+                drive_id=drive_id,
                 created_at=created_at,
                 last_modified=last_modified,
                 created_by=created_by,

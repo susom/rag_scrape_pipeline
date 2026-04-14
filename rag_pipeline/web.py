@@ -1315,3 +1315,167 @@ async def ingest_batch(
                 "run_id": None,
             },
         )
+
+
+@app.post("/api/reset-ingestion", tags=["Ingestion"])
+async def reset_ingestion(
+    request: Request,
+    confirm: bool = False,
+    site: str = None,
+    db: Session = Depends(get_db),
+):
+    """
+    Reset ingestion state for a clean-slate re-run.
+
+    Clears:
+    1. Pinecone vectors (via RAG EM deleteDocument for each tracked vector ID)
+    2. MySQL document_ingestion_state rows for the namespace
+    3. SharePoint tracker list items (all entries deleted via Graph API)
+
+    Query params:
+        - confirm: Must be true to execute (safety check)
+        - site: SharePoint site name (omit for default site)
+
+    Returns summary of what was cleared.
+    """
+    from fastapi.responses import JSONResponse
+
+    # Auth check
+    if INGESTION_API_KEY:
+        provided = request.headers.get("X-Ingestion-Key", "")
+        if not secrets.compare_digest(provided, INGESTION_API_KEY):
+            raise HTTPException(status_code=401, detail="Unauthorized")
+
+    if not confirm:
+        return JSONResponse(
+            status_code=400,
+            content={
+                "status": "error",
+                "message": "Safety check: pass ?confirm=true to execute reset. This will DELETE all vectors, MySQL records, and tracker list entries.",
+            },
+        )
+
+    from rag_pipeline.database.models import DocumentIngestionState
+    from rag_pipeline.automation.rag_client import delete_document
+    from rag_pipeline.sharepoint import SharePointGraphClient, get_site_config
+
+    results = {
+        "site": site or "default",
+        "vectors_deleted": 0,
+        "vectors_failed": 0,
+        "mysql_rows_deleted": 0,
+        "tracker_items_deleted": 0,
+        "tracker_items_failed": 0,
+        "errors": [],
+    }
+
+    # Determine namespace
+    namespace_override = os.getenv("RAG_NAMESPACE_OVERRIDE", "").strip() or None
+    namespace = site if site and site != "default" else None
+    db_namespace = namespace_override or namespace or "default"
+
+    logger.info(f"=== RESET INGESTION: namespace={db_namespace}, site={site or 'default'} ===")
+
+    # Step 1: Delete Pinecone vectors via RAG EM API
+    try:
+        records = db.query(DocumentIngestionState).filter(
+            DocumentIngestionState.rag_namespace == db_namespace,
+        ).all()
+
+        all_vector_ids = []
+        for record in records:
+            if record.rag_vector_ids:
+                try:
+                    ids = json.loads(record.rag_vector_ids)
+                    if isinstance(ids, list):
+                        all_vector_ids.extend(ids)
+                except (json.JSONDecodeError, TypeError):
+                    pass
+            if record.rag_vector_id:
+                all_vector_ids.append(record.rag_vector_id)
+
+        # Deduplicate
+        all_vector_ids = list(set(all_vector_ids))
+        logger.info(f"Found {len(all_vector_ids)} vector(s) to delete from Pinecone")
+
+        for vid in all_vector_ids:
+            try:
+                delete_document(vector_id=vid, namespace=db_namespace)
+                results["vectors_deleted"] += 1
+            except Exception as e:
+                results["vectors_failed"] += 1
+                results["errors"].append(f"Vector delete failed ({vid[:30]}...): {e}")
+                logger.warning(f"Failed to delete vector {vid}: {e}")
+
+    except Exception as e:
+        results["errors"].append(f"Vector cleanup failed: {e}")
+        logger.error(f"Vector cleanup error: {e}")
+
+    # Step 2: Delete MySQL rows
+    try:
+        deleted = db.query(DocumentIngestionState).filter(
+            DocumentIngestionState.rag_namespace == db_namespace,
+        ).delete(synchronize_session="fetch")
+        db.commit()
+        results["mysql_rows_deleted"] = deleted
+        logger.info(f"Deleted {deleted} MySQL row(s) for namespace '{db_namespace}'")
+    except Exception as e:
+        db.rollback()
+        results["errors"].append(f"MySQL cleanup failed: {e}")
+        logger.error(f"MySQL cleanup error: {e}")
+
+    # Step 3: Clear SharePoint tracker list
+    try:
+        site_config = get_site_config(site)
+        client = SharePointGraphClient(
+            site_hostname=site_config.hostname,
+            site_path=site_config.path,
+            tenant_id=site_config.tenant_id,
+            client_id=site_config.client_id,
+            client_secret=site_config.client_secret,
+        )
+
+        # Resolve tracker list ID
+        tracker_list_id = ""
+        tracker_list_name = ""
+        if site and site != "default":
+            tracker_list_id = os.getenv(f"SHAREPOINT_SITE_{site.upper()}_TRACKER_LIST_ID", "").strip()
+            tracker_list_name = os.getenv(f"SHAREPOINT_SITE_{site.upper()}_TRACKER_LIST_NAME", "").strip()
+        else:
+            tracker_list_id = os.getenv("SHAREPOINT_TRACKER_LIST_ID", "").strip()
+            tracker_list_name = os.getenv("SHAREPOINT_TRACKER_LIST_NAME", "").strip()
+
+        if not tracker_list_id and tracker_list_name:
+            tracker_list_id = client.get_list_by_name(tracker_list_name).get("id", "")
+
+        if tracker_list_id:
+            site_id = client.get_site_id()
+            items = list(client.get_list_items(list_id=tracker_list_id, max_items=500))
+            logger.info(f"Found {len(items)} tracker list item(s) to delete")
+
+            for item in items:
+                item_id = item.get("id")
+                if not item_id:
+                    continue
+                try:
+                    client._make_request("DELETE", f"/sites/{site_id}/lists/{tracker_list_id}/items/{item_id}")
+                    results["tracker_items_deleted"] += 1
+                except Exception as e:
+                    results["tracker_items_failed"] += 1
+                    results["errors"].append(f"Tracker item delete failed ({item_id}): {e}")
+                    logger.warning(f"Failed to delete tracker item {item_id}: {e}")
+        else:
+            logger.info("No tracker list configured, skipping tracker cleanup")
+
+    except Exception as e:
+        results["errors"].append(f"Tracker list cleanup failed: {e}")
+        logger.error(f"Tracker list cleanup error: {e}")
+
+    status = "completed" if not results["errors"] else "completed_with_errors"
+    logger.info(f"Reset complete: {results}")
+
+    return {
+        "status": status,
+        "namespace": db_namespace,
+        **results,
+    }

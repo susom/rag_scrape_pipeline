@@ -13,6 +13,7 @@ import os
 import json
 import re
 from datetime import datetime, timezone
+from zoneinfo import ZoneInfo
 from typing import List, Optional, Dict, Tuple
 from dataclasses import dataclass, asdict
 from sqlalchemy.orm import Session
@@ -88,7 +89,17 @@ def _format_timestamp(value: Optional[datetime]) -> Optional[str]:
         return None
     if value.tzinfo is None:
         value = value.replace(tzinfo=timezone.utc)
-    return value.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
+    local_time = value.astimezone(ZoneInfo("America/Los_Angeles"))
+    formatted = local_time.strftime("%b %-d, %Y %-I:%M %p")
+    return f"{formatted} PT"
+
+
+def _ensure_aware(value: Optional[datetime]) -> Optional[datetime]:
+    if not value:
+        return None
+    if value.tzinfo is None:
+        return value.replace(tzinfo=timezone.utc)
+    return value
 
 
 @dataclass
@@ -345,7 +356,9 @@ class IngestionOrchestrator:
                     DocumentIngestionState.rag_namespace == self.db_namespace,
                 ).first()
 
-                if existing and existing.last_processed_at and sp_file.last_modified <= existing.last_processed_at:
+                last_modified = _ensure_aware(sp_file.last_modified)
+                last_processed = _ensure_aware(existing.last_processed_at) if existing else None
+                if existing and last_processed and last_modified and last_modified <= last_processed:
                     self._update_last_seen(document_id)
                     continue
 
@@ -364,7 +377,7 @@ class IngestionOrchestrator:
                 "content_section": _build_content_section(sp_file.library_name, sp_file.parent_path) or "",
                 "document_title": sp_file.file_name,
                 "document_modified": _format_timestamp(sp_file.last_modified),
-                "document_modified_by": sp_file.modified_by,
+                "document_modified_by": sp_file.content_editor,
                 "document_created": _format_timestamp(sp_file.created_at),
                 "approver": sp_file.approver,
                 "modified_by": sp_file.modified_by,

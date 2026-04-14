@@ -43,11 +43,13 @@ class SharePointFile:
     file_name: str
     url: str
     download_url: Optional[str]
+    drive_id: Optional[str] = None
     created_at: Optional[datetime] = None
     last_modified: Optional[datetime] = None
     modified_by: Optional[str] = None
     created_by: Optional[str] = None
     approver: Optional[str] = None
+    content_editor: Optional[str] = None
     library_name: Optional[str] = None
     parent_path: Optional[str] = None
     list_item_fields: Optional[dict] = None
@@ -153,6 +155,141 @@ def _extract_approver_name(fields: Optional[dict]) -> Optional[str]:
         return str(value)
 
     return None
+
+
+def _extract_field_value(fields: Optional[dict], field_name: Optional[str]) -> Optional[str]:
+    if not fields or not field_name:
+        return None
+    value = fields.get(field_name)
+    if value is None:
+        return None
+    if isinstance(value, list) and value:
+        entry = value[0]
+        if isinstance(entry, dict):
+            return entry.get("LookupValue") or entry.get("displayName") or entry.get("Email")
+        return str(entry)
+    if isinstance(value, dict):
+        return value.get("LookupValue") or value.get("displayName") or value.get("Email")
+    return str(value)
+
+
+def _resolve_library_field_name(
+    client: SharePointGraphClient,
+    drive_id: Optional[str],
+    display_name: Optional[str],
+) -> Optional[str]:
+    if not drive_id or not display_name:
+        return None
+    try:
+        list_info = client.get_drive_list(drive_id)
+        list_id = list_info.get("id")
+        if not list_id:
+            return None
+        columns = list(client.get_list_columns(list_id))
+    except Exception as e:
+        logger.warning(f"Failed to resolve library fields for drive {drive_id}: {e}")
+        return None
+
+    display_key = display_name.strip().lower()
+    name_map = {
+        (col.get("displayName") or "").strip().lower(): col.get("name")
+        for col in columns
+        if col.get("displayName")
+    }
+    internal_names = {col.get("name") for col in columns if col.get("name")}
+
+    if display_name in internal_names:
+        return display_name
+    return name_map.get(display_key)
+
+
+def _extract_last_content_editor(
+    client: SharePointGraphClient,
+    drive_id: Optional[str],
+    file_id: Optional[str],
+    approver_name: Optional[str],
+    fallback_editor: Optional[str],
+    max_activities: int = 20,
+) -> Optional[str]:
+    """
+    Extract the last content editor using the drive item activities API.
+
+    Activities track actual edits (including minor/draft versions) even when
+    approval workflows collapse minor versions into major versions.
+    Falls back to version history if activities are unavailable.
+    """
+    if fallback_editor and approver_name:
+        if fallback_editor.strip().lower() != approver_name.strip().lower():
+            return fallback_editor
+    if not drive_id or not file_id:
+        return fallback_editor
+    if not approver_name:
+        return fallback_editor
+
+    approver_norm = approver_name.strip().lower()
+
+    # Primary: use activities API (tracks actual edits, not just published versions)
+    try:
+        activities = list(client.get_drive_item_activities(
+            drive_id=drive_id,
+            item_id=file_id,
+            max_items=max_activities,
+        ))
+        if activities:
+            for activity in activities:
+                action = activity.get("action", {})
+                if "edit" not in action:
+                    continue
+                actor = activity.get("actor", {}).get("user", {}).get("displayName")
+                if not actor:
+                    continue
+                if actor.strip().lower() == approver_norm:
+                    continue
+                return actor
+    except Exception as e:
+        logger.warning(f"Activities API failed for {file_id}, falling back to version history: {e}")
+
+    # Fallback: version history (may miss minor versions collapsed by approval)
+    try:
+        versions = list(client.get_drive_item_versions(
+            drive_id=drive_id,
+            item_id=file_id,
+            max_items=max_activities,
+        ))
+    except Exception as e:
+        logger.warning(f"Failed to fetch version history for {file_id}: {e}")
+        return fallback_editor
+
+    if not versions:
+        return fallback_editor
+
+    def _parse_version_time(version: dict) -> Optional[datetime]:
+        raw = version.get("lastModifiedDateTime")
+        if not raw:
+            return None
+        try:
+            return datetime.fromisoformat(raw.replace("Z", "+00:00"))
+        except (ValueError, AttributeError):
+            return None
+
+    def _get_version_editor(version: dict) -> Optional[str]:
+        info = version.get("lastModifiedBy") or {}
+        if info.get("user"):
+            return info["user"].get("displayName")
+        if info.get("application"):
+            return info["application"].get("displayName")
+        return None
+
+    default_time = datetime.min.replace(tzinfo=timezone.utc)
+    for version in sorted(versions, key=lambda v: _parse_version_time(v) or default_time, reverse=True):
+        editor = _get_version_editor(version)
+        if not editor:
+            continue
+        if editor.strip().lower() == approver_norm:
+            continue
+        return editor
+
+    return fallback_editor
 
 
 def _fetch_external_urls_file(
@@ -336,6 +473,8 @@ def fetch_content_sources(
             library_prefixes = site_config.library_prefixes or _default_library_prefixes()
             drives = list(client.get_drives())
             library_drive_ids = site_config.library_drive_ids or []
+            content_editor_field = site_config.content_editor_field
+            content_editor_fields_by_drive: Dict[str, Optional[str]] = {}
             if library_drive_ids:
                 allowed_drives = [drive for drive in drives if drive.get("id") in library_drive_ids]
                 missing = [drive_id for drive_id in library_drive_ids if drive_id not in {d.get("id") for d in allowed_drives}]
@@ -358,6 +497,13 @@ def fetch_content_sources(
                 if not drive_id:
                     continue
 
+                if drive_id not in content_editor_fields_by_drive and content_editor_field:
+                    content_editor_fields_by_drive[drive_id] = _resolve_library_field_name(
+                        client=client,
+                        drive_id=drive_id,
+                        display_name=content_editor_field,
+                    )
+
                 manifest = client.get_document_manifest(
                     drive_id=drive_id,
                     modified_since=modified_since,
@@ -369,16 +515,31 @@ def fetch_content_sources(
                     if not _is_item_approved(item.list_item_fields, site_config.approval_field):
                         continue
 
+                    approver_name = _extract_approver_name(item.list_item_fields)
+                    content_editor = _extract_field_value(
+                        item.list_item_fields,
+                        content_editor_fields_by_drive.get(drive_id),
+                    )
+                    if not content_editor:
+                        content_editor = _extract_last_content_editor(
+                            client=client,
+                            drive_id=drive_id,
+                            file_id=item.sharepoint_id,
+                            approver_name=approver_name,
+                            fallback_editor=item.last_modified_by,
+                        )
                     sharepoint_files.append(SharePointFile(
                         file_id=item.sharepoint_id,
                         file_name=item.name,
                         url=item.url,
                         download_url=item.download_url,
+                        drive_id=item.drive_id,
                         created_at=item.created_at,
                         last_modified=item.last_modified,
                         modified_by=item.last_modified_by,
                         created_by=item.created_by,
-                        approver=_extract_approver_name(item.list_item_fields),
+                        approver=approver_name,
+                        content_editor=content_editor,
                         library_name=item.library_name,
                         parent_path=item.parent_path,
                         list_item_fields=item.list_item_fields,
@@ -410,6 +571,17 @@ def _escape_odata_value(value: str) -> str:
     return value.replace("'", "''")
 
 
+def _normalize_tracker_doc_title(value: Any) -> Optional[str]:
+    if value is None:
+        return None
+    if not isinstance(value, str):
+        return str(value).strip() or None
+    text = re.sub(r"<[^>]+>", " ", value)
+    text = html.unescape(text)
+    text = re.sub(r"\s+", " ", text).strip()
+    return text or None
+
+
 def _increment_version(current_value: Any) -> int:
     try:
         if current_value is None:
@@ -433,7 +605,7 @@ def _resolve_tracker_field_names(
         "document_link": "Document Link",
         "modified_by": "Modify By",
         "document_modified": "Document Modified",
-        "document_modified_by": "Document Modified By",
+        "document_modified_by": "Last Editor",
         "document_created": "Document Created",
         "approver": "Approver",
         "version": "RExI Version",
@@ -643,45 +815,69 @@ def update_tracker_list(
 
         existing_item = None
         if doc_title_raw and field_names.get("document_title"):
-            filter_query = f"fields/{field_names['document_title']} eq '{_escape_odata_value(doc_title_raw)}'"
-            if content_section and field_names.get("content_section"):
-                filter_query += f" and fields/{field_names['content_section']} eq '{_escape_odata_value(content_section)}'"
+            doc_title_norm = _normalize_tracker_doc_title(doc_title_raw)
+            matches = []
             try:
                 items = list(client.get_list_items(
                     list_id=tracker_list_id,
-                    max_items=2,
-                    filter_query=filter_query,
+                    max_items=500,
                 ))
-                existing_item = items[0] if items else None
+
+                # Primary match: by source URL in the Document Link field (most stable identifier)
+                if url and link_field_name:
+                    url_norm = url.rstrip("/").lower()
+                    for item in items:
+                        fields = item.get("fields", {})
+                        item_link = fields.get(link_field_name)
+                        item_url = None
+                        if isinstance(item_link, dict):
+                            item_url = (item_link.get("Url") or "").rstrip("/").lower()
+                        elif isinstance(item_link, str):
+                            item_url = item_link.rstrip("/").lower()
+                        if item_url and item_url == url_norm:
+                            matches.append(item)
+
+                # If Document Title is rich text (contains URL), also match by extracting href
+                if not matches and url and title_is_rich:
+                    url_norm = url.rstrip("/").lower()
+                    title_field = field_names.get("document_title")
+                    if title_field:
+                        for item in items:
+                            fields = item.get("fields", {})
+                            raw_val = fields.get(title_field) or ""
+                            href_match = re.search(r'href=["\']([^"\']+)["\']', raw_val)
+                            if href_match:
+                                item_url = href_match.group(1).rstrip("/").lower()
+                                if item_url == url_norm:
+                                    matches.append(item)
+
+                # Fallback match: by normalized document title (no content_section filter)
+                if not matches:
+                    for item in items:
+                        fields = item.get("fields", {})
+                        item_title = _normalize_tracker_doc_title(fields.get(field_names["document_title"]))
+                        if item_title and item_title == doc_title_norm:
+                            matches.append(item)
             except Exception as e:
                 logger.warning(f"Tracker lookup failed, will create new entry: {e}")
-                existing_item = None
+                matches = []
 
-            if not existing_item and content_section and field_names.get("content_section"):
-                fallback_filter = f"fields/{field_names['document_title']} eq '{_escape_odata_value(doc_title_raw)}'"
-                try:
-                    fallback_items = list(client.get_list_items(
-                        list_id=tracker_list_id,
-                        max_items=2,
-                        filter_query=fallback_filter,
-                    ))
-                    if len(fallback_items) == 1:
-                        existing_item = fallback_items[0]
-                except Exception as e:
-                    logger.warning(f"Tracker fallback lookup failed, will create new entry: {e}")
-
-            if not existing_item and doc_title_html:
-                html_filter = f"fields/{field_names['document_title']} eq '{_escape_odata_value(doc_title_html)}'"
-                try:
-                    html_items = list(client.get_list_items(
-                        list_id=tracker_list_id,
-                        max_items=2,
-                        filter_query=html_filter,
-                    ))
-                    if len(html_items) == 1:
-                        existing_item = html_items[0]
-                except Exception as e:
-                    logger.warning(f"Tracker HTML lookup failed, will create new entry: {e}")
+            if matches:
+                def _item_sort_key(candidate: dict) -> str:
+                    return candidate.get("createdDateTime") or ""
+                matches = sorted(matches, key=_item_sort_key, reverse=True)
+                existing_item = matches[0]
+                if len(matches) > 1:
+                    site_id = client.get_site_id()
+                    for extra in matches[1:]:
+                        extra_id = extra.get("id")
+                        if not extra_id:
+                            continue
+                        try:
+                            client._make_request("DELETE", f"/sites/{site_id}/lists/{tracker_list_id}/items/{extra_id}")
+                            logger.info(f"Deleted duplicate tracker entry: {extra_id}")
+                        except Exception as e:
+                            logger.warning(f"Failed to delete duplicate tracker entry {extra_id}: {e}")
 
         if existing_item:
             current_fields = existing_item.get("fields", {})
