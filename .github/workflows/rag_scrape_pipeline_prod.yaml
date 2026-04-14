@@ -95,6 +95,6 @@ jobs:
             --port=8080 \
             --set-secrets=REDCAP_API_URL=REDCAP_API_URL:latest \
             --set-secrets=REDCAP_API_TOKEN=REDCAP_API_TOKEN:latest \
-            --set-secrets=STORAGE_MODE=STORAGE_MODE:latest \
+            --set-env-vars=STORAGE_MODE=gcs \
             --set-secrets=GCS_BUCKET=GCS_BUCKET:latest 
           set +x
