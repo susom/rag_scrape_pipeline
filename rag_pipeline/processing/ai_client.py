@@ -1,6 +1,6 @@
 import os
-import requests
 from dotenv import load_dotenv
+from rag_pipeline.utils.http import get_session
 from rag_pipeline.utils.logger import setup_logger
 
 # ensure .env is loaded into the process
@@ -75,7 +75,7 @@ def chat_completion(
         payload["json_schema"] = json_lib.dumps(json_schema)
 
     try:
-        resp = requests.post(redcap_api_url, data=payload, timeout=120)
+        resp = get_session().post(redcap_api_url, data=payload, timeout=120)
         resp.raise_for_status()
         data = resp.json()
 
@@ -87,7 +87,3 @@ def chat_completion(
     except Exception as e:
         logger.error(f"SecureChatAI API error: {e}")
         raise RuntimeError(f"SecureChatAI API call failed: {e}")
-
-
-# Legacy alias for backward compatibility
-deepseek_chat = chat_completion

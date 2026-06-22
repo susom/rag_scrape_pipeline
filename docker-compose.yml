@@ -37,6 +37,11 @@ services:
       - GCP_PROJECT_ID=${GCP_PROJECT_ID:-}
       - SHAREPOINT_SITE_HOSTNAME=${SHAREPOINT_SITE_HOSTNAME:-}
       - SHAREPOINT_SITE_PATH=${SHAREPOINT_SITE_PATH:-}
+      # RAG backend: "pinecone" (default) or "pgvector"
+      # pgvector: set REXI_AI_BACKEND_URL to the RExI AI backend base URL
+      - RAG_BACKEND=${RAG_BACKEND:-pinecone}
+      - REXI_AI_BACKEND_URL=${REXI_AI_BACKEND_URL:-http://localhost:7701}
+      - PGVECTOR_NAMESPACE=${PGVECTOR_NAMESPACE:-rexi_knowledge}
     stdin_open: true
     tty: true
     command: uvicorn rag_pipeline.web:app --host 0.0.0.0 --port 8080 --reload --timeout-keep-alive 7200

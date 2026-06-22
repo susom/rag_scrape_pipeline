@@ -6,14 +6,12 @@ Primary interface for the RAG preparation tool.
 from contextlib import asynccontextmanager
 from fastapi import FastAPI, HTTPException, Body, UploadFile, File, Form, Depends, Query, Request
 from fastapi.responses import HTMLResponse, FileResponse
-from fastapi.openapi.utils import get_openapi
 from typing import List
 import json
 import os
 import re
 import secrets
 import time
-import hashlib
 
 from rag_pipeline.main import run_pipeline
 from rag_pipeline.processing.text_extraction import extract_text_from_file, get_thinker_name
@@ -422,8 +420,6 @@ def run_scrape(payload: dict = Body(...)):
     """Process URLs through the pipeline."""
     urls = payload.get("urls", [])
     model = payload.get("model", DEFAULT_MODEL)
-    system = payload.get("system", "")
-    user_template = payload.get("user_template", "")
     follow_links = str(payload.get("follow_links", "true")).lower() == "true"
     tags = payload.get("tags", [])
 
@@ -753,8 +749,8 @@ def database_status():
 
 # ==================== SharePoint API Endpoints ====================
 
-from rag_pipeline.sharepoint import SharePointGraphClient, get_site_config_manager, get_site_config
-from typing import Optional
+from rag_pipeline.sharepoint import SharePointGraphClient, get_site_config_manager, get_site_config  # noqa: E402
+from typing import Optional  # noqa: E402
 
 # Cache for SharePoint clients (keyed by site name)
 _sharepoint_clients: dict[str, SharePointGraphClient] = {}
@@ -1183,7 +1179,7 @@ def search_sharepoint(
 # ==================== Automated Ingestion Endpoint ====================
 
 @app.post("/api/ingest-batch")
-async def ingest_batch(
+def ingest_batch(
     request: Request,
     force_reprocess: bool = False,
     document_ids: str = None,
@@ -1318,7 +1314,7 @@ async def ingest_batch(
 
 
 @app.post("/api/reset-ingestion", tags=["Ingestion"])
-async def reset_ingestion(
+def reset_ingestion(
     request: Request,
     confirm: bool = False,
     site: str = None,

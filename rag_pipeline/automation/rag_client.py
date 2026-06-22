@@ -13,6 +13,7 @@ import time
 import requests
 from typing import Dict, Optional
 from dotenv import load_dotenv
+from rag_pipeline.utils.http import get_session
 from rag_pipeline.utils.logger import setup_logger
 
 # Ensure .env is loaded
@@ -87,7 +88,7 @@ def store_document(
         try:
             logger.debug(f"Storing document '{title}' (attempt {attempt}/{MAX_RETRIES})")
 
-            resp = requests.post(api_url, data=payload, timeout=120)
+            resp = get_session().post(api_url, data=payload, timeout=120)
             resp.raise_for_status()
             data = resp.json()
 
@@ -176,7 +177,7 @@ def query_documents(
         payload["namespace"] = namespace
 
     try:
-        resp = requests.post(api_url, data=payload, timeout=120)
+        resp = get_session().post(api_url, data=payload, timeout=120)
         resp.raise_for_status()
         data = resp.json()
 
@@ -237,7 +238,7 @@ def delete_document(
         payload["namespace"] = namespace
 
     try:
-        resp = requests.post(api_url, data=payload, timeout=120)
+        resp = get_session().post(api_url, data=payload, timeout=120)
         resp.raise_for_status()
         data = resp.json()
 

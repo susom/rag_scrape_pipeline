@@ -7,7 +7,7 @@ import os
 import re
 import requests
 from bs4 import BeautifulSoup
-from urllib.parse import urljoin, urlparse
+from urllib.parse import urljoin
 from rag_pipeline.utils.logger import setup_logger
 from rag_pipeline.scraping.pdf_parser import process_pdfs
 
