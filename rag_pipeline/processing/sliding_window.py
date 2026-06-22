@@ -16,7 +16,6 @@ from dataclasses import dataclass
 import tiktoken
 from rag_pipeline.processing.ai_client import chat_completion, DEFAULT_MODEL
 from rag_pipeline.utils.logger import setup_logger
-from rag_pipeline.storage.storage import StorageManager
 
 logger = setup_logger()
 
@@ -256,32 +255,6 @@ class SlidingWindowParser:
         return system_prompt, user_prompt
 
 
-    def _parse_extracts(self, response: str) -> List[str]:
-        extracts = []
-        lines = response.split("\n")
-        for line in lines:
-            line = line.strip()
-            if line.startswith("EXTRACT:"):
-                extract = line[8:].strip()
-                if len(extract) > 30:
-                    extract = re.sub(r"\s+", " ", extract)
-                    extracts.append(extract)
-
-        if not extracts:
-            for line in lines:
-                line = line.strip()
-                if line and len(line) > 30 and not line.lower().startswith(
-                    ("note:", "commentary:", "translator:", "editor:")
-                ):
-                    line = re.sub(r"^\d+\.\s*", "", line)
-                    line = re.sub(r"^[-*•]\s*", "", line)
-                    line = re.sub(r'^[\"\u201c]|[\"\u201d]$', "", line)
-                    line = re.sub(r"\s+", " ", line).strip()
-                    if line:
-                        extracts.append(line)
-
-        return extracts
-
     def calculate_cost(self) -> float:
         input_cost = (self.stats.input_tokens / 1_000_000) * self.pricing["input_discount"]
         output_cost = (self.stats.output_tokens / 1_000_000) * self.pricing["output_discount"]
@@ -310,41 +283,6 @@ class SlidingWindowParser:
                 seen.add(normalized)
                 unique_extracts.append(extract)
         return unique_extracts
-
-    def _rag_ready_path(self, output_file: str) -> str:
-        # Always write JSONL into cache/rag_ready/<basename>.jsonl
-        base = os.path.basename(output_file)
-        path = os.path.join("cache", "rag_ready", base)
-        os.makedirs(os.path.dirname(path), exist_ok=True)
-        return path
-
-    def save_section_json(self, section_json_str, output_file):
-        """Save ONE section as a single JSON object for RAG ingestion."""
-        final_path = self._rag_ready_path(output_file)
-        os.makedirs(os.path.dirname(final_path), exist_ok=True)
-
-        # Ensure the extract is valid JSON
-        section_obj = json.loads(section_json_str)
-
-        with open(final_path, "w", encoding="utf-8") as f:
-            json.dump(section_obj, f, ensure_ascii=False, indent=2)
-
-        logger.info(f"Saved JSON for ingestion: {final_path}")
-
-    def save_to_jsonl(self, extracts, output_file, source="main", section_id=None, url=None):
-        final_path = self._rag_ready_path(output_file)
-        with open(final_path, "w", encoding="utf-8") as f:
-            for extract in extracts:
-                record = {
-                    "text": extract,
-                    "metadata": {
-                        "source": source,
-                        "section_id": section_id or "",
-                        "url": url or ""
-                    }
-                }
-                f.write(json.dumps(record, ensure_ascii=False) + "\n")
-        logger.info(f"Saved JSONL locally: {final_path}")
 
     def process_file(self, input_file: str, output_file: str, thinker_name: str) -> tuple[int, list[dict]]:
         self.stats.start_time = time.time()

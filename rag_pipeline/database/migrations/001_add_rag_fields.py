@@ -11,7 +11,6 @@ Usage:
     python -m rag_pipeline.database.migrations.001_add_rag_fields
 """
 
-import os
 import sys
 from sqlalchemy import text
 from rag_pipeline.database.connection import engine

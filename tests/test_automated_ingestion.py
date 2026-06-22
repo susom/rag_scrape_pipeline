@@ -72,8 +72,8 @@ def test_database_models():
     print("✅ Database models have all required RAG tracking fields")
 
 
-@patch('rag_pipeline.automation.rag_client.requests.post')
-def test_rag_client_store_document(mock_post):
+@patch('rag_pipeline.automation.rag_client.get_session')
+def test_rag_client_store_document(mock_get_session):
     """Test RAG client storeDocument API call."""
     from rag_pipeline.automation.rag_client import store_document
     import os
@@ -88,7 +88,8 @@ def test_rag_client_store_document(mock_post):
         "message": "Document stored successfully"
     }
     mock_response.raise_for_status = Mock()
-    mock_post.return_value = mock_response
+    mock_post = Mock(return_value=mock_response)
+    mock_get_session.return_value = Mock(post=mock_post)
 
     # Set environment variables
     os.environ["REDCAP_API_URL"] = "http://test-api.example.com/api/"

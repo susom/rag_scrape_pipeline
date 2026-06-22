@@ -1,5 +1,4 @@
 import os
-import sys
 
 def list_urls():
     with open("config/urls.txt") as f:

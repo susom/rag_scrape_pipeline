@@ -5,8 +5,8 @@ SQLAlchemy models for RAG Pipeline (MySQL compatible).
 import uuid
 import hashlib
 from datetime import datetime, timezone
-from sqlalchemy import Column, String, DateTime, Text, ForeignKey, Boolean, Integer, CHAR, BigInteger, LargeBinary, UniqueConstraint
-from sqlalchemy.orm import declarative_base, relationship
+from sqlalchemy import Column, String, DateTime, Text, Boolean, Integer, CHAR, BigInteger, LargeBinary, UniqueConstraint
+from sqlalchemy.orm import declarative_base
 from sqlalchemy.types import TypeDecorator
 
 Base = declarative_base()
@@ -103,22 +103,6 @@ class DocumentIngestionState(Base):
         if not content:
             return None
         return hashlib.sha256(content.encode()).digest()
-
-    @staticmethod
-    def compute_content_hash_hex(content: str) -> str:
-        """Compute SHA-256 hash of document content as hex string."""
-        if not content:
-            return None
-        return hashlib.sha256(content.encode()).hexdigest()
-
-    def update_content_hash(self, content: str) -> bool:
-        """Update content hash and last_content_update_at timestamp if content changed."""
-        new_hash = self.compute_content_hash(content)
-        if new_hash != self.content_hash:
-            self.content_hash = new_hash
-            self.last_content_update_at = datetime.now(timezone.utc)
-            return True
-        return False
 
     @staticmethod
     def generate_document_id(title: str, url: str = None, content: str = None) -> str:

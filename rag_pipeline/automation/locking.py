@@ -8,8 +8,6 @@ runs at a time across multiple Cloud Run instances.
 import os
 import socket
 from datetime import datetime, timedelta, timezone
-from typing import Optional
-from sqlalchemy import text
 from sqlalchemy.orm import Session
 from sqlalchemy.exc import IntegrityError
 from rag_pipeline.database.models import IngestionLock
