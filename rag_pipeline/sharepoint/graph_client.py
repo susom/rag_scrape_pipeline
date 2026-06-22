@@ -13,9 +13,11 @@ Handles pagination and authentication via Azure AD.
 import os
 import time
 import requests
-from typing import Optional, Generator, Any, List
+from urllib.parse import quote
+from typing import Optional, Generator, List
 from datetime import datetime
 from dataclasses import dataclass
+from rag_pipeline.utils.http import get_session
 from rag_pipeline.utils.logger import setup_logger
 
 logger = setup_logger()
@@ -172,7 +174,7 @@ class SharePointGraphClient:
             "grant_type": "client_credentials",
         }
 
-        response = requests.post(token_url, data=data)
+        response = get_session().post(token_url, data=data)
         response.raise_for_status()
 
         token_data = response.json()
@@ -215,7 +217,7 @@ class SharePointGraphClient:
 
         for attempt in range(self.MAX_RETRIES):
             try:
-                response = requests.request(
+                response = get_session().request(
                     method=method,
                     url=url,
                     headers=headers,
@@ -347,6 +349,80 @@ class SharePointGraphClient:
 
         for page in self._paginate(url, params=params, use_beta=True, max_items=max_items):
             yield page
+
+    def get_site_pages_field_map(
+        self,
+        field_internal_names: List[str],
+        key_field: str = "FileLeafRef",
+        max_items: Optional[int] = None,
+    ) -> dict:
+        """
+        Build a map of "Site Pages" library list-item fields, keyed by `key_field`.
+
+        The modern /sites/{id}/pages API does NOT expose custom columns, so to read
+        curation columns (e.g. "RAG Worthy?" / RAGWorthy_x003f_) we must read the
+        underlying SitePages list items with $expand=fields.
+
+        The default key `FileLeafRef` equals the modern page's `name` property, so
+        callers can join page objects to these fields by page name.
+
+        Args:
+            field_internal_names: Internal column names to retrieve (e.g. ["RAGWorthy_x003f_"]).
+            key_field: Field used as the dict key (default "FileLeafRef").
+            max_items: Optional cap on number of items.
+
+        Returns:
+            Dict mapping key_field value -> fields dict (the requested columns).
+        """
+        site_id = self.get_site_id()
+
+        # The SitePages library is frequently absent from /lists enumeration, but is
+        # reachable directly by its well-known display name.
+        list_meta = self._make_request("GET", f"/sites/{site_id}/lists/{quote('Site Pages')}")
+        list_id = list_meta["id"]
+
+        select_fields = ",".join(dict.fromkeys([key_field, *field_internal_names]))
+        params = {"$expand": f"fields($select={select_fields})"}
+        url = f"/sites/{site_id}/lists/{list_id}/items"
+
+        logger.info(f"Building SitePages field map for columns: {field_internal_names}")
+
+        result: dict = {}
+        for item in self._paginate(url, params=params, max_items=max_items):
+            fields = item.get("fields", {})
+            key = fields.get(key_field)
+            if key:
+                result[key] = fields
+        return result
+
+    def publish_page(self, page_id: str, comment: Optional[str] = None) -> dict:
+        """
+        Publish a site page (promotes the current draft to the published version).
+
+        Useful for clearing the pending minor-draft state that SharePoint creates
+        when a page's CANVAS content is edited and left as a draft.
+
+        LIMITATION: this does NOT clear drafts created by editing a *list column*
+        (e.g. checking "RAG Worthy?" via the list). That bumps the list-item version
+        but leaves nothing on the page-canvas publish track, so this action returns
+        204 yet is a no-op. Clearing those requires the SharePoint REST file Publish
+        API (which currently rejects this app's app-only token). Callers should verify
+        publishingState.level afterwards rather than trust the 204.
+
+        WARNING: when it does apply, it publishes ALL pending changes on the page,
+        not just metadata — any unfinished draft content edits will also go live.
+
+        Args:
+            page_id: Page ID
+            comment: Optional check-in/publish comment
+
+        Returns:
+            Empty dict on success (HTTP 204).
+        """
+        site_id = self.get_site_id()
+        url = f"/sites/{site_id}/pages/{page_id}/microsoft.graph.sitePage/publish"
+        json_data = {"comment": comment} if comment else None
+        return self._make_request("POST", url, json_data=json_data, use_beta=True)
 
     def get_page_by_id(self, page_id: str) -> dict:
         """
@@ -791,7 +867,7 @@ class SharePointGraphClient:
             "Authorization": f"Bearer {self._get_access_token()}",
         }
 
-        response = requests.get(url, headers=headers, timeout=60)
+        response = get_session().get(url, headers=headers, timeout=60)
         response.raise_for_status()
 
         return response.content
@@ -983,7 +1059,7 @@ class SharePointGraphClient:
             "Authorization": f"Bearer {self._get_access_token()}",
         }
 
-        response = requests.get(url, headers=headers, timeout=60)
+        response = get_session().get(url, headers=headers, timeout=60)
         response.raise_for_status()
 
         return response.content
@@ -1264,6 +1340,6 @@ class SharePointGraphClient:
         Returns:
             File content as bytes
         """
-        response = requests.get(download_url, timeout=120)
+        response = get_session().get(download_url, timeout=120)
         response.raise_for_status()
         return response.content

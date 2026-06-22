@@ -20,6 +20,29 @@ from rag_pipeline.utils.logger import setup_logger
 logger = setup_logger()
 
 
+# Cache of SharePointGraphClient instances keyed by site name. Reused across
+# calls so the per-instance OAuth token + site-id caches are shared instead of
+# re-authenticating on every page fetch (avoids N+1 token/site-id lookups).
+_sharepoint_clients: Dict[str, SharePointGraphClient] = {}
+
+
+def _get_sharepoint_client(site_name: Optional[str] = None) -> SharePointGraphClient:
+    """Get or create a cached SharePoint client for the given site."""
+    key = (site_name or "default").lower().strip()
+    client = _sharepoint_clients.get(key)
+    if client is None:
+        site_config = get_site_config(site_name)
+        client = SharePointGraphClient(
+            site_hostname=site_config.hostname,
+            site_path=site_config.path,
+            tenant_id=site_config.tenant_id,
+            client_id=site_config.client_id,
+            client_secret=site_config.client_secret,
+        )
+        _sharepoint_clients[key] = client
+    return client
+
+
 @dataclass
 class SharePointPage:
     """
@@ -360,13 +383,7 @@ def fetch_content_sources(
 
     try:
         site_config = get_site_config(site_name)
-        client = SharePointGraphClient(
-            site_hostname=site_config.hostname,
-            site_path=site_config.path,
-            tenant_id=site_config.tenant_id,
-            client_id=site_config.client_id,
-            client_secret=site_config.client_secret,
-        )
+        client = _get_sharepoint_client(site_name)
         content_source = (site_config.content_source or "site_pages").lower()
 
         if content_source == "site_pages":
@@ -390,6 +407,36 @@ def fetch_content_sources(
                 logger.error(f"Failed to fetch site pages: {e}")
                 return [], [], []
 
+            # --- Build RAG curation map (custom column not exposed by the pages API) ---
+            # If the site defines a rag_filter_column (e.g. "RAGWorthy_x003f_"), read the
+            # SitePages list items so we can require the column == truthy below.
+            #
+            # NOTE on publishing: checking the RAG curation box is itself an edit, which
+            # creates a new *minor draft* version (X.1) on top of the live *published major*
+            # (X.0). The modern /pages API therefore reports publishingState.level == "draft"
+            # for tagged pages even though a published version is still live. So when a RAG
+            # filter column is configured, we gate on "has ever been published"
+            # (FirstPublishedDate is set) rather than the latest version's publish level.
+            rag_filter_column = (site_config.rag_filter_column or "").strip()
+            rag_field_map = {}
+            if rag_filter_column:
+                try:
+                    rag_field_map = client.get_site_pages_field_map(
+                        [rag_filter_column, "FirstPublishedDate"]
+                    )
+                    logger.info(
+                        f"Loaded RAG filter column '{rag_filter_column}' for "
+                        f"{len(rag_field_map)} page(s)"
+                    )
+                except Exception as e:
+                    # Fail safe: if we cannot read the curation column, do NOT ingest
+                    # everything indiscriminately — skip this run's pages.
+                    logger.error(
+                        f"Failed to read RAG filter column '{rag_filter_column}'; "
+                        f"skipping site_pages ingestion this run: {e}"
+                    )
+                    return [], [], []
+
             # --- Separate external URLs page from regular pages ---
             regular_pages = []
             external_urls_page = None
@@ -404,16 +451,39 @@ def fetch_content_sources(
 
                 regular_pages.append(page_data)
 
-            # --- Filter regular pages: published + date filter ---
+            # --- Filter regular pages ---
+            # Default gate: latest version published.
+            # RAG-curated gate (rag_filter_column set): RAG Worthy? == Yes AND the page has
+            # been published at least once (FirstPublishedDate set). We deliberately do NOT
+            # require the *latest* version to be published, because tagging creates a pending
+            # minor draft on top of the live published major (see note above).
             filtered_pages = []
             for page_data in regular_pages:
-                # Check publishing state
                 publishing = page_data.get("publishingState", {})
                 level = publishing.get("level", "") if publishing else ""
 
-                if level != "published":
-                    logger.debug(f"Skipping unpublished page: {page_data.get('title')} ({level})")
-                    continue
+                if rag_filter_column:
+                    page_name = page_data.get("name", "")
+                    page_fields = rag_field_map.get(page_name) or {}
+
+                    is_rag_worthy = bool(page_fields.get(rag_filter_column))
+                    if not is_rag_worthy:
+                        logger.debug(
+                            f"Skipping non-RAG page: {page_data.get('title')} "
+                            f"({rag_filter_column} not set)"
+                        )
+                        continue
+
+                    has_been_published = bool(page_fields.get("FirstPublishedDate"))
+                    if not has_been_published:
+                        logger.debug(
+                            f"Skipping never-published RAG page: {page_data.get('title')}"
+                        )
+                        continue
+                else:
+                    if level != "published":
+                        logger.debug(f"Skipping unpublished page: {page_data.get('title')} ({level})")
+                        continue
 
                 # Check last modified date
                 last_modified_str = page_data.get("lastModifiedDateTime")
@@ -567,10 +637,6 @@ def fetch_content_sources(
     return sharepoint_pages, sharepoint_files, external_urls
 
 
-def _escape_odata_value(value: str) -> str:
-    return value.replace("'", "''")
-
-
 def _normalize_tracker_doc_title(value: Any) -> Optional[str]:
     if value is None:
         return None
@@ -710,14 +776,7 @@ def update_tracker_list(
         True if successful, False otherwise
     """
     try:
-        site_config = get_site_config(site_name)
-        client = SharePointGraphClient(
-            site_hostname=site_config.hostname,
-            site_path=site_config.path,
-            tenant_id=site_config.tenant_id,
-            client_id=site_config.client_id,
-            client_secret=site_config.client_secret,
-        )
+        client = _get_sharepoint_client(site_name)
 
         # Site-specific or default tracker list ID/name
         tracker_list_id = ""
@@ -948,14 +1007,7 @@ def get_page_content(page_id: str, site_name: Optional[str] = None) -> str:
         Plain text content of the page
     """
     try:
-        site_config = get_site_config(site_name)
-        client = SharePointGraphClient(
-            site_hostname=site_config.hostname,
-            site_path=site_config.path,
-            tenant_id=site_config.tenant_id,
-            client_id=site_config.client_id,
-            client_secret=site_config.client_secret,
-        )
+        client = _get_sharepoint_client(site_name)
         return client.get_page_text_content(page_id)
     except Exception as e:
         logger.error(f"Failed to get page content for {page_id}: {e}")

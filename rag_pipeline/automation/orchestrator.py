@@ -21,21 +21,26 @@ from sqlalchemy.orm import Session
 from rag_pipeline.database.models import DocumentIngestionState
 from rag_pipeline.automation.content_fetcher import (
     fetch_content_sources,
-    fetch_content_sources_stub,
     SharePointPage,
     SharePointFile,
     get_page_content,
     update_tracker_list,
 )
-from rag_pipeline.sharepoint import SharePointGraphClient, SharePointItem, get_site_config
-from rag_pipeline.automation.rag_client import store_document, delete_document
-from rag_pipeline.automation.locking import DistributedLock, LockAlreadyHeld
+from rag_pipeline.sharepoint import SharePointGraphClient, get_site_config
 from rag_pipeline.processing.text_extraction import extract_text_from_file, get_thinker_name
 from rag_pipeline.processing.sliding_window import SlidingWindowParser
 from rag_pipeline.main import run_pipeline
-from rag_pipeline.output_json import generate_run_id, write_canonical_json
+from rag_pipeline.output_json import write_canonical_json
 from rag_pipeline.scraping.scraper import scrape_url
 from rag_pipeline.utils.logger import setup_logger
+
+# RAG_BACKEND=pgvector → push to pgvector postgres via RExI /rag/ingest endpoint
+# RAG_BACKEND=pinecone (default) → push to Pinecone via REDCap EM API
+_RAG_BACKEND = os.getenv("RAG_BACKEND", "pinecone").lower()
+if _RAG_BACKEND == "pgvector":
+    from rag_pipeline.automation.pgvector_client import store_document, delete_document
+else:
+    from rag_pipeline.automation.rag_client import store_document, delete_document
 
 logger = setup_logger()
 
@@ -202,6 +207,17 @@ class IngestionOrchestrator:
             )
 
             logger.info(f"Found {len(documents_to_process)} document(s) to process")
+
+            # Step 2b: Reconcile deletions (untagged / unpublished / removed pages).
+            # Runs every cron run, independent of new content, so removals propagate
+            # even when there is nothing new to ingest.
+            logger.info("Reconciling deletions...")
+            reconcile_stats = self._reconcile_deletions()
+            if reconcile_stats.get("documents_deleted"):
+                logger.info(
+                    f"Reconciliation removed {reconcile_stats['documents_deleted']} "
+                    f"document(s) / {reconcile_stats['vectors_deleted']} vector(s)"
+                )
 
             if not documents_to_process:
                 logger.info("No documents to process - all up to date")
@@ -487,6 +503,140 @@ class IngestionOrchestrator:
         except Exception as e:
             logger.warning(f"Failed to update last_seen_at for {document_id}: {e}")
             self.db.rollback()
+
+    def _reconcile_deletions(self) -> Dict:
+        """
+        Remove RAG vectors for documents that are no longer eligible for ingestion
+        (untagged "RAG Worthy?", unpublished, or deleted from SharePoint).
+
+        Strategy (reconciliation / tombstone):
+          1. Build the FULL current eligible identity set with NO date window
+             (modified_since=None) so every currently-eligible page is included.
+          2. Find DB records in this namespace that previously completed ingestion
+             (status == "completed" with live vectors) whose document_id is no longer
+             in the eligible set — these are orphans.
+          3. Delete each orphan's vectors from the store and tombstone the record
+             (status = "deleted", clear vector ids). document_id is stable, so a later
+             re-tag re-ingests cleanly.
+
+        Safety:
+          - MUST use a full scan, never the cron date window, or unmodified pages would
+            be treated as deleted.
+          - Skips entirely if enumeration fails or the eligible set is smaller than
+            INGESTION_RECONCILE_MIN_ELIGIBLE (guards against a fetch glitch mass-deleting).
+          - Scoped to content_source == "site_pages" for now (the SOM/REDCap path).
+        """
+        stats = {"documents_deleted": 0, "vectors_deleted": 0, "skipped_reason": None}
+
+        site_config = get_site_config(self.site_name)
+        content_source = (site_config.content_source or "site_pages").lower()
+        if content_source != "site_pages":
+            stats["skipped_reason"] = f"unsupported_content_source:{content_source}"
+            logger.info(f"Reconciliation skipped (content_source={content_source})")
+            return stats
+
+        # 1) Full eligible identity set (no date window)
+        try:
+            pages, _files, _urls = fetch_content_sources(
+                modified_since=None, site_name=self.site_name
+            )
+        except Exception as e:
+            stats["skipped_reason"] = "enumeration_failed"
+            logger.error(f"Reconciliation skipped: failed to enumerate eligible content: {e}")
+            return stats
+
+        eligible_ids = {
+            DocumentIngestionState.generate_document_id(
+                title=p.title or p.name, url=p.url
+            )
+            for p in pages
+        }
+
+        min_eligible = int(os.getenv("INGESTION_RECONCILE_MIN_ELIGIBLE", "1"))
+        if len(eligible_ids) < min_eligible:
+            stats["skipped_reason"] = "below_min_eligible"
+            logger.warning(
+                f"Reconciliation skipped: eligible set ({len(eligible_ids)}) "
+                f"< INGESTION_RECONCILE_MIN_ELIGIBLE ({min_eligible})"
+            )
+            return stats
+
+        # 2) Orphans: completed records in this namespace not in the eligible set
+        completed_records = self.db.query(DocumentIngestionState).filter(
+            DocumentIngestionState.rag_namespace == self.db_namespace,
+            DocumentIngestionState.rag_ingestion_status == "completed",
+        ).all()
+
+        orphans = [r for r in completed_records if r.document_id not in eligible_ids]
+        if not orphans:
+            logger.info(
+                f"Reconciliation: 0 orphans ({len(eligible_ids)} eligible, "
+                f"{len(completed_records)} completed in namespace '{self.db_namespace}')"
+            )
+            return stats
+
+        logger.info(
+            f"Reconciliation: {len(orphans)} orphaned document(s) to remove "
+            f"from namespace '{self.db_namespace}'"
+        )
+
+        # 3) Delete vectors + tombstone
+        for record in orphans:
+            vector_ids = []
+            if record.rag_vector_ids:
+                try:
+                    vector_ids = json.loads(record.rag_vector_ids)
+                except (ValueError, TypeError):
+                    logger.warning(f"Could not parse rag_vector_ids for orphan {record.document_id}")
+            if not vector_ids and record.rag_vector_id:
+                vector_ids = [record.rag_vector_id]
+
+            if self.dry_run:
+                logger.info(
+                    f"DRY RUN - would delete {len(vector_ids)} vector(s) and tombstone "
+                    f"orphan {record.document_id}"
+                )
+                stats["documents_deleted"] += 1
+                stats["vectors_deleted"] += len(vector_ids)
+                continue
+
+            all_deleted = True
+            for vid in vector_ids:
+                try:
+                    delete_document(vector_id=vid, namespace=record.rag_namespace)
+                    stats["vectors_deleted"] += 1
+                except Exception as e:
+                    all_deleted = False
+                    logger.warning(
+                        f"Failed to delete vector {vid} for orphan {record.document_id}: {e}"
+                    )
+
+            if not all_deleted:
+                # Leave record as-is so a future run retries the deletion.
+                logger.warning(
+                    f"Orphan {record.document_id} not fully deleted; will retry next run"
+                )
+                self.errors.append({
+                    "type": "reconcile_delete_partial",
+                    "document_id": record.document_id,
+                })
+                continue
+
+            record.rag_ingestion_status = "deleted"
+            record.rag_vector_ids = json.dumps([])
+            record.rag_vector_id = None
+            stats["documents_deleted"] += 1
+            try:
+                self.db.commit()
+            except Exception as e:
+                logger.error(f"Failed to commit tombstone for {record.document_id}: {e}")
+                self.db.rollback()
+
+        logger.info(
+            f"Reconciliation complete: {stats['documents_deleted']} document(s) tombstoned, "
+            f"{stats['vectors_deleted']} vector(s) deleted"
+        )
+        return stats
 
     def _process_documents(self, documents_to_process: List[Dict]) -> Dict:
         """
@@ -899,7 +1049,7 @@ class IngestionOrchestrator:
                             "source_uri": source_uri,
                             "section_hash": section["section_hash"],
                         },
-                        namespace=self.db_namespace if self.db_namespace else None,
+                        namespace=self.db_namespace if self.db_namespace and self.db_namespace != "default" else None,
                     )
 
                     vector_id = result.get("vector_id")

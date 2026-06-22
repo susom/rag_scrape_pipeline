@@ -52,6 +52,11 @@ class SiteConfig:
     external_urls_file: Optional[str] = None
     approval_field: Optional[str] = None
     content_editor_field: Optional[str] = None
+    # Optional internal name of a boolean SharePoint column used to curate which
+    # site pages get ingested (e.g. "RAGWorthy_x003f_"). When set, only pages
+    # whose column value is truthy are ingested. None = ingest all (subject to
+    # the other filters).
+    rag_filter_column: Optional[str] = None
     # Optional per-site Azure AD credentials.
     # If None, SharePointGraphClient falls back to global env vars / Secret Manager.
     tenant_id: Optional[str] = None
@@ -110,6 +115,7 @@ class SiteConfigManager:
                 external_urls_file=default_external_urls_file,
                 approval_field=default_approval_field,
                 content_editor_field=default_content_editor_field or "Last Editor (Draft)",
+                rag_filter_column=os.getenv("SHAREPOINT_SITE_RAG_FILTER_COLUMN", "").strip() or None,
             )
             logger.info(f"Loaded default SharePoint site: {default_hostname}{default_path}")
 
@@ -145,6 +151,9 @@ class SiteConfigManager:
                     content_editor_field = os.getenv(
                         f"SHAREPOINT_SITE_{site_name}_CONTENT_EDITOR_FIELD", ""
                     ).strip() or None
+                    rag_filter_column = os.getenv(
+                        f"SHAREPOINT_SITE_{site_name}_RAG_FILTER_COLUMN", ""
+                    ).strip() or None
 
                     if hostname:
                         normalized_name = site_name.lower()
@@ -162,6 +171,7 @@ class SiteConfigManager:
                         external_urls_file=external_urls_file,
                         approval_field=approval_field,
                         content_editor_field=content_editor_field or "Last Editor (Draft)",
+                        rag_filter_column=rag_filter_column,
                     )
                         logger.info(f"Loaded SharePoint site '{normalized_name}': {hostname}{path}")
 
