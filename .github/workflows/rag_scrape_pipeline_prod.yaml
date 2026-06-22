@@ -93,8 +93,7 @@ jobs:
             --cpu=2 \
             --memory=4Gi \
             --port=8080 \
-            --set-secrets=REDCAP_API_URL=REDCAP_API_URL:latest \
-            --set-secrets=REDCAP_API_TOKEN=REDCAP_API_TOKEN:latest \
-            --set-env-vars=STORAGE_MODE=gcs \
-            --set-secrets=GCS_BUCKET=GCS_BUCKET:latest 
+            --add-cloudsql-instances=som-rit-phi-redcap-prod:us-west1:redcap-rag \
+            --set-env-vars=STORAGE_MODE=gcs,GCP_PROJECT_ID=som-rit-phi-redcap-prod,SHAREPOINT_SITE_HOSTNAME=office365stanford.sharepoint.com,SHAREPOINT_SITE_PATH=/sites/REDCap,SHAREPOINT_SITE_CONTENT_SOURCE=site_pages,SHAREPOINT_SITE_RAG_FILTER_COLUMN=RAGWorthy_x003f_,DB_NAME=document_ingestion_state,DB_SOCKET_DIR=/cloudsql,RAG_NAMESPACE_OVERRIDE=redcap_som_sharepoint \
+            --set-secrets=REDCAP_API_URL=REDCAP_API_URL:latest,REDCAP_API_TOKEN=REDCAP_API_TOKEN:latest,GCS_BUCKET=GCS_BUCKET:latest,SHAREPOINT_CLIENT_ID=SHAREPOINT_CLIENT_ID:latest,SHAREPOINT_CLIENT_SECRET=SHAREPOINT_CLIENT_SECRET:latest,SHAREPOINT_TENANT_ID=SHAREPOINT_TENANT_ID:latest,DB_USER=RAG_DB_USER:latest,DB_PASSWORD=RAG_DB_PASSWORD:latest 
           set +x
