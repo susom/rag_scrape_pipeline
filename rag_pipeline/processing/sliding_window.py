@@ -14,7 +14,7 @@ import time
 from typing import List, Tuple
 from dataclasses import dataclass
 import tiktoken
-from rag_pipeline.processing.ai_client import chat_completion, DEFAULT_MODEL
+from rag_pipeline.processing.ai_gateway import chat_completion, DEFAULT_MODEL
 from rag_pipeline.utils.logger import setup_logger
 
 logger = setup_logger()
