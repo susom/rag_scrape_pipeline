@@ -1,23 +1,35 @@
 """
-pgvector RAG client — stores documents via the RExI AI backend's /rag/ingest endpoint.
+pgvector RAG client — writes documents DIRECTLY into the RExI rag_chunks table.
 
 Drop-in replacement for rag_client.store_document / delete_document when
-RAG_BACKEND=pgvector.  The RExI backend handles embedding (AI Hub
-text-embedding-3-small) and INSERT into rag_chunks (pgvector postgres).
+RAG_BACKEND=pgvector.  The pipeline already connects to the RExI Postgres
+(rexi_db) for ingestion tracking, and rag_chunks lives in the SAME database,
+so we embed via AI Hub and INSERT directly — no HTTP call, no IAP auth, no
+dependency on the RExI backend being up.
+
+This mirrors RExI's PgVectorRagService.ingest exactly:
+  - dense:  AI Hub text-embedding-3-small (1536) -> rag_chunks.dense_vec
+  - sparse: to_tsvector('english', text)         -> rag_chunks.ts_vec
+  - id:     server-generated uuid (gen_random_uuid)
+
+RExI's /api/ai/rag/ingest endpoint remains available for one-off/ad-hoc work;
+both paths write the same table with the same embedding model and ts config.
 
 Environment variables:
-  REXI_AI_BACKEND_URL   Base URL of the RExI AI backend.
-                        Default: http://localhost:7701
-                        Production: the Cloud Run service URL for rexi-ai.
-  PGVECTOR_NAMESPACE    Vector namespace written to rag_chunks.namespace.
-                        Default: rexi_knowledge
+  PGVECTOR_NAMESPACE     rag_chunks.namespace value (default: rexi_knowledge).
+  AI_HUB_EMBEDDING_URL   AI Hub embeddings URL (used by aihub_client.embed).
+  DB_SCHEMA              Schema holding rag_chunks (default: rexi).
 """
 
+import json
 import os
 import time
-import requests
 from typing import Dict, Optional
-from rag_pipeline.utils.http import get_session
+
+from sqlalchemy import text
+
+from rag_pipeline.processing.aihub_client import embed
+from rag_pipeline.database.connection import engine, DB_SCHEMA
 from rag_pipeline.utils.logger import setup_logger
 
 logger = setup_logger()
@@ -25,8 +37,18 @@ logger = setup_logger()
 MAX_RETRIES = 3
 RETRY_DELAY_SECONDS = 2
 
-DEFAULT_REXI_URL = os.getenv("REXI_AI_BACKEND_URL", "http://localhost:7701")
 DEFAULT_NAMESPACE = os.getenv("PGVECTOR_NAMESPACE", "rexi_knowledge")
+
+
+def _table_ref() -> str:
+    """Schema-qualified rag_chunks reference (falls back to unqualified)."""
+    schema = DB_SCHEMA or os.getenv("DB_SCHEMA", "rexi")
+    return f'"{schema}".rag_chunks' if schema else "rag_chunks"
+
+
+def _vector_literal(embedding) -> str:
+    """List[float] -> pgvector text literal '[0.1,0.2,...]'."""
+    return "[" + ",".join(repr(float(x)) for x in embedding) + "]"
 
 
 def store_document(
@@ -38,49 +60,53 @@ def store_document(
     namespace: Optional[str] = None,
 ) -> Dict:
     """
-    Store a document section in pgvector via the RExI /rag/ingest endpoint.
+    Embed `content` via AI Hub and INSERT a row into rag_chunks.
 
-    Interface mirrors rag_client.store_document so orchestrator.py can swap
-    backends with a single import change.
-
-    Returns:
-        {
-            "status": "success",
-            "vector_id": "<uuid from rag_chunks.id>",
-            "namespace": "rexi_knowledge",
-            "title": "<section_id>",
-            "message": "Document stored in pgvector",
-        }
+    Interface mirrors rag_client.store_document so orchestrator.py swaps backends
+    with a single import change. Returns the server-generated uuid as vector_id
+    (the orchestrator stores it for later cleanup on re-ingestion).
     """
-    base_url = (api_url or DEFAULT_REXI_URL).rstrip("/")
-    ns = namespace or DEFAULT_NAMESPACE
+    if engine is None:
+        raise RuntimeError("pgvector store_document: database engine not configured")
 
-    payload = {
-        "title":     title,
-        "text":      content,
-        "metadata":  metadata or {},
-        "namespace": ns,
-    }
+    ns = namespace or DEFAULT_NAMESPACE
+    # Mirror RExI: stuff the title into metadata alongside the dedicated column.
+    full_meta = dict(metadata or {})
+    full_meta["title"] = title
+    meta_json = json.dumps(full_meta)
+    table = _table_ref()
+
+    insert_sql = text(
+        f"INSERT INTO {table} (namespace, title, text, metadata, dense_vec, ts_vec) "
+        f"VALUES (:ns, :title, :text, CAST(:meta AS jsonb), CAST(:vec AS vector), "
+        f"to_tsvector('english', :text)) "
+        f"RETURNING id"
+    )
 
     last_error = None
     for attempt in range(1, MAX_RETRIES + 1):
         try:
             logger.debug(f"pgvector ingest '{title}' (attempt {attempt}/{MAX_RETRIES})")
-            resp = get_session().post(f"{base_url}/rag/ingest", json=payload, timeout=60)
-            resp.raise_for_status()
-            data = resp.json()
+            embedding = embed(content)
+            vec_literal = _vector_literal(embedding)
 
-            vector_id = data.get("id") or data.get("vector_id", "")
+            with engine.begin() as conn:
+                row = conn.execute(
+                    insert_sql,
+                    {"ns": ns, "title": title, "text": content, "meta": meta_json, "vec": vec_literal},
+                ).fetchone()
+
+            vector_id = str(row[0]) if row else ""
             logger.info(f"pgvector stored '{title}', id={vector_id}")
             return {
-                "status":    "success",
+                "status": "success",
                 "vector_id": vector_id,
                 "namespace": ns,
-                "title":     title,
-                "message":   "Document stored in pgvector",
+                "title": title,
+                "message": "Document stored in pgvector",
             }
 
-        except requests.exceptions.RequestException as e:
+        except Exception as e:
             last_error = e
             logger.warning(f"pgvector ingest attempt {attempt}/{MAX_RETRIES} failed: {e}")
             if attempt < MAX_RETRIES:
@@ -96,28 +122,21 @@ def delete_document(
     api_token: Optional[str] = None,
 ) -> Dict:
     """
-    Delete a chunk from pgvector via the RExI /rag/delete endpoint.
-
-    If the endpoint doesn't exist yet, logs a warning and returns success so
-    orchestrator cleanup loops don't break.
+    Delete a chunk from rag_chunks by id. Used by orchestrator cleanup loops to
+    remove stale vectors after a re-ingestion. Missing rows are treated as success.
     """
-    base_url = (api_url or DEFAULT_REXI_URL).rstrip("/")
-    ns = namespace or DEFAULT_NAMESPACE
+    if engine is None:
+        raise RuntimeError("pgvector delete_document: database engine not configured")
+
+    table = _table_ref()
+    delete_sql = text(f"DELETE FROM {table} WHERE id = CAST(:id AS uuid)")
 
     try:
-        resp = get_session().post(
-            f"{base_url}/rag/delete",
-            json={"id": vector_id, "namespace": ns},
-            timeout=30,
-        )
-        resp.raise_for_status()
-        logger.info(f"pgvector deleted chunk {vector_id}")
+        with engine.begin() as conn:
+            result = conn.execute(delete_sql, {"id": vector_id})
+        deleted = result.rowcount if result.rowcount is not None else 0
+        logger.info(f"pgvector deleted chunk {vector_id} (rows={deleted})")
         return {"status": "success", "message": f"Deleted {vector_id}"}
-    except requests.exceptions.HTTPError as e:
-        if e.response is not None and e.response.status_code == 404:
-            logger.warning(f"pgvector /rag/delete not implemented on backend, skipping {vector_id}")
-            return {"status": "success", "message": "delete not implemented on backend"}
-        raise RuntimeError(f"pgvector delete failed: {e}")
     except Exception as e:
         logger.warning(f"pgvector delete failed for {vector_id}: {e}")
         return {"status": "success", "message": f"delete skipped: {e}"}

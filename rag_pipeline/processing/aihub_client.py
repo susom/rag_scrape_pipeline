@@ -9,8 +9,10 @@ The deployment (model) is baked into AI_HUB_BASE_URL, e.g.:
   https://aihubapi.stanfordhealthcare.org/azure-openai/deployments/gpt-4-1/chat/completions?api-version=2024-06-01
 
 Environment variables:
-  AI_HUB_BASE_URL   Full Azure OpenAI chat/completions URL (incl. deployment + api-version).
-  AI_HUB_API_KEY    AI Hub API key (sent as the `api-key` header).
+  AI_HUB_BASE_URL        Full Azure OpenAI chat/completions URL (incl. deployment + api-version).
+  AI_HUB_EMBEDDING_URL   Full Azure OpenAI embeddings URL (incl. deployment + api-version).
+                         Used by embed() for the direct pgvector write path (RExI RAG store).
+  AI_HUB_API_KEY         AI Hub API key (sent as the `api-key` header).
 """
 
 import os
@@ -90,3 +92,41 @@ def chat_completion(
     except Exception as e:
         logger.error(f"AI Hub API error: {e}")
         raise RuntimeError(f"AI Hub API call failed: {e}")
+
+
+def embed(text: str) -> list:
+    """
+    Compute a dense embedding for `text` via AI Hub (Azure OpenAI embeddings).
+
+    Mirrors RExI's LlmClient.embed: POST {"input": text} to AI_HUB_EMBEDDING_URL
+    with the `api-key` header; returns data[0].embedding as a list of floats
+    (text-embedding-3-small -> 1536 dims). Used by the direct pgvector write path.
+    """
+    embedding_url = os.getenv("AI_HUB_EMBEDDING_URL")
+    api_key = os.getenv("AI_HUB_API_KEY")
+
+    if not embedding_url:
+        raise ValueError("Missing AI_HUB_EMBEDDING_URL in environment.")
+    if not api_key:
+        raise ValueError("Missing AI_HUB_API_KEY in environment.")
+
+    headers = {"Content-Type": "application/json", "api-key": api_key}
+
+    try:
+        resp = get_session().post(embedding_url, json={"input": text}, headers=headers, timeout=60)
+        resp.raise_for_status()
+        data = resp.json()
+
+        items = data.get("data")
+        if not items:
+            raise RuntimeError(f"AI Hub embeddings returned no data: {data}")
+
+        vector = items[0].get("embedding")
+        if not vector:
+            raise RuntimeError(f"AI Hub embeddings response missing embedding: {data}")
+
+        return vector
+
+    except Exception as e:
+        logger.error(f"AI Hub embeddings error: {e}")
+        raise RuntimeError(f"AI Hub embeddings call failed: {e}")

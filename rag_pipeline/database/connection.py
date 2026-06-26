@@ -22,6 +22,11 @@ logger = setup_logger()
 
 DB_SCHEMA = os.getenv("DB_SCHEMA", "").strip() or None
 
+# When the runtime user has no DDL rights (e.g. the GKE pod's gke-rexi-sa, which
+# only holds CRUD on a pre-created schema), skip all CREATE statements in init_db
+# and just verify connectivity. Set DB_SKIP_INIT_DDL=true for such deployments.
+DB_SKIP_INIT_DDL = os.getenv("DB_SKIP_INIT_DDL", "").strip().lower() in ("1", "true", "yes", "on")
+
 
 def _db_engine_kind() -> str:
     """Return the configured engine family: 'postgresql' or 'mysql' (default)."""
@@ -114,7 +119,10 @@ try:
         @event.listens_for(engine, "connect")
         def _set_search_path(dbapi_conn, _conn_record):
             cur = dbapi_conn.cursor()
-            cur.execute(f'SET search_path TO "{DB_SCHEMA}"')
+            # Include public so extension types (e.g. pgvector's `vector`) resolve
+            # regardless of which schema the extension was installed into; tables
+            # still resolve to DB_SCHEMA first.
+            cur.execute(f'SET search_path TO "{DB_SCHEMA}", public')
             cur.close()
 
         engine = engine.execution_options(schema_translate_map={None: DB_SCHEMA})
@@ -221,6 +229,17 @@ def init_db():
     if engine is None:
         logger.warning("Cannot initialize database: engine not configured")
         return False
+
+    if DB_SKIP_INIT_DDL:
+        # Pod has no DDL rights; tables are pre-created. Verify connectivity only.
+        try:
+            with engine.connect() as conn:
+                conn.execute(text("SELECT 1"))
+            logger.info("DB_SKIP_INIT_DDL set — skipping schema/table creation (connectivity OK)")
+            return True
+        except Exception as e:
+            logger.error(f"Database connectivity check failed: {e}")
+            return False
 
     try:
         if engine.dialect.name == "postgresql" and DB_SCHEMA:
