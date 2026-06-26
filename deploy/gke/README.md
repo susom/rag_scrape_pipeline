@@ -34,13 +34,15 @@ MySQL), so nothing here affects the live SOM leg.
 
 ### 1. DB readiness (you, in Cloud SQL Studio as `rexi_owner`)
 Paste the contents of [`db_readiness.sql`](./db_readiness.sql). It creates
-`rexi.ingestion_locks`, grants schema/table/sequence privileges to `rexi_app`,
-and grants `rexi_app` to the pod's IAM DB user. The other two tables
-(`rag_chunks`, `document_ingestion_state`) already exist.
+`rexi.ingestion_locks` and grants schema/table/sequence privileges directly to
+the pod's IAM DB user (`gke-rexi-sa@som-rit-phi-rexi-dev.iam`). The other two
+tables (`rag_chunks`, `document_ingestion_state`) already exist.
 
-> If inserts later fail with "permission denied for table ...", the IAM role
-> isn't inheriting `rexi_app` — confirm `GRANT rexi_app TO "gke-rexi-sa@som-rit-phi-rexi-dev.iam"`
-> ran and the role has `INHERIT`.
+> Object privileges are granted directly to the IAM user rather than via
+> `GRANT rexi_app TO <iam user>` — that role-membership grant needs ADMIN on
+> `rexi_app` (superuser only), and Studio runs the batch in one transaction so a
+> failure there rolls back everything. If you'd rather manage one role, run the
+> commented-out membership grant as the `postgres` superuser instead.
 
 ### 2. Build + push the image (needs Artifact Registry write)
 `irvins@stanford.edu` lacks `artifactregistry.repositories.create/push` in
