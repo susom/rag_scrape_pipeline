@@ -1,0 +1,42 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: rag-pipeline-config
+  namespace: rexi
+  labels:
+    app: rag-pipeline
+data:
+  # ---- AI backend: Stanford Health Care AI Hub (Azure OpenAI) ----
+  AI_BACKEND: "aihub"
+  AI_HUB_BASE_URL: "https://aihubapi.stanfordhealthcare.org/azure-openai/deployments/gpt-4-1/chat/completions?api-version=2024-06-01"
+  AI_HUB_EMBEDDING_URL: "https://aihubapi.stanfordhealthcare.org/azure-openai/deployments/text-embedding-3-small/embeddings?api-version=2024-06-01"
+
+  # ---- RAG store: write chunks directly into rexi.rag_chunks (pgvector) ----
+  RAG_BACKEND: "pgvector"
+  PGVECTOR_NAMESPACE: "rexi_knowledge"
+
+  # ---- Tracking DB: Cloud SQL Postgres (rexi_db) via private DNS + IAM auth ----
+  DB_ENGINE: "postgresql"
+  DB_IAM_AUTH: "true"
+  DB_HOST: "rexi.db.internal"
+  DB_PORT: "5432"
+  DB_NAME: "rexi_db"
+  DB_USER: "gke-rexi-sa@som-rit-phi-rexi-dev.iam"
+  DB_SCHEMA: "rexi"
+  # Pod has CRUD only (no DDL) — skip create_all, tables are pre-created.
+  DB_SKIP_INIT_DDL: "true"
+
+  # ---- SharePoint source: RExI site, named workflow document libraries ----
+  # Approval gating (_ApprovalStatus / _ModerationStatus) is auto-detected per
+  # library by content_fetcher, so no APPROVAL_FIELD override is needed.
+  SHAREPOINT_SITE_REXI_HOSTNAME: "office365stanford.sharepoint.com"
+  SHAREPOINT_SITE_REXI_PATH: "/sites/RExI"
+  SHAREPOINT_SITE_REXI_CONTENT_SOURCE: "document_library"
+  SHAREPOINT_SITE_REXI_TENANT_ID: "396573cb-f378-4b68-9bc8-15755c0c51f3"
+  SHAREPOINT_SITE_REXI_CLIENT_ID: "329f031c-27e0-4acb-af9b-124a2a3719e3"
+  # Comma-separated drive IDs of the 8 named workflow libraries (excludes the
+  # default "Documents" library and "TEST RExI Document Library").
+  SHAREPOINT_SITE_REXI_LIBRARY_DRIVE_IDS: "b!BXWUfoFePki1FTOIM50Tb7Ru3GLtKONNoLeFVKHt_P3VvjUeDP3iRrDaCS7pm89b,b!BXWUfoFePki1FTOIM50Tb7Ru3GLtKONNoLeFVKHt_P0cVBlSj3r6S5XTPEKYHfNl,b!BXWUfoFePki1FTOIM50Tb7Ru3GLtKONNoLeFVKHt_P2fVAhhAKAtR4UzROJQMnrU,b!BXWUfoFePki1FTOIM50Tb7Ru3GLtKONNoLeFVKHt_P09otc8WgbkRoHIXvGKXftT,b!BXWUfoFePki1FTOIM50Tb7Ru3GLtKONNoLeFVKHt_P0I-o4CX5WiS7rlcOK2fdiT,b!BXWUfoFePki1FTOIM50Tb7Ru3GLtKONNoLeFVKHt_P3KuPaShlSTT5ewsLN8DMx7,b!BXWUfoFePki1FTOIM50Tb7Ru3GLtKONNoLeFVKHt_P0HknWgJFenT5eSx1auW4yQ,b!BXWUfoFePki1FTOIM50Tb7Ru3GLtKONNoLeFVKHt_P3ZPgQ73YXQRL_Q7VvU4nHx"
+  # Post-ingest tracker list ("RExI Content Status List").
+  SHAREPOINT_SITE_REXI_TRACKER_LIST_ID: "ab779dfe-32d3-4f66-a49f-805e7d991664"
+  SHAREPOINT_SITE_REXI_TRACKER_LIST_NAME: "RExI Content Status List"

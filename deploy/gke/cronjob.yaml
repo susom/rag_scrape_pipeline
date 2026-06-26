@@ -1,0 +1,73 @@
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: rag-pipeline-rexi
+  namespace: rexi
+  labels:
+    app: rag-pipeline
+    site: rexi
+spec:
+  # Nightly at 09:00 UTC. Adjust as needed.
+  schedule: "0 9 * * *"
+  # Never overlap runs (the pipeline also holds a DB-backed DistributedLock).
+  concurrencyPolicy: Forbid
+  startingDeadlineSeconds: 600
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 3
+  jobTemplate:
+    spec:
+      # One attempt; a failed run is retried by the next schedule.
+      backoffLimit: 0
+      # Hard cap so a hung run can't block the next (link-following can be slow).
+      activeDeadlineSeconds: 3600
+      template:
+        metadata:
+          labels:
+            app: rag-pipeline
+            site: rexi
+        spec:
+          restartPolicy: Never
+          # Workload Identity → IAM DB auth + AI Hub egress (same SA as rexi-app).
+          serviceAccountName: gke-rexi-sa
+          # Autopilot amd64 nodes (matches rexi-app toleration).
+          tolerations:
+            - effect: NoSchedule
+              key: kubernetes.io/arch
+              operator: Equal
+              value: amd64
+          containers:
+            - name: ingest
+              # TODO: set to the pushed image (see deploy/gke/README.md).
+              image: us-west1-docker.pkg.dev/som-rit-phi-rexi-dev/rag-pipeline/ingest:latest
+              imagePullPolicy: IfNotPresent
+              command:
+                - python
+                - -m
+                - rag_pipeline.ingest_batch
+                - --site
+                - rexi
+                - --days-back
+                - "1"
+              envFrom:
+                - configMapRef:
+                    name: rag-pipeline-config
+                - secretRef:
+                    name: rag-pipeline-secrets
+              volumeMounts:
+                - name: cache
+                  mountPath: /app/cache
+                - name: tmp
+                  mountPath: /tmp
+              resources:
+                requests:
+                  cpu: "500m"
+                  memory: 1Gi
+                  ephemeral-storage: 1Gi
+                limits:
+                  memory: 2Gi
+                  ephemeral-storage: 2Gi
+          volumes:
+            - name: cache
+              emptyDir: {}
+            - name: tmp
+              emptyDir: {}
