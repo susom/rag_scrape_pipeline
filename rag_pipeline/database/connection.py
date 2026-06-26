@@ -14,6 +14,8 @@ Postgres-specific:
 """
 
 import os
+import ssl
+from urllib.parse import quote_plus
 from sqlalchemy import create_engine, text, event
 from sqlalchemy.orm import sessionmaker
 from rag_pipeline.utils.logger import setup_logger
@@ -26,6 +28,24 @@ DB_SCHEMA = os.getenv("DB_SCHEMA", "").strip() or None
 # only holds CRUD on a pre-created schema), skip all CREATE statements in init_db
 # and just verify connectivity. Set DB_SKIP_INIT_DDL=true for such deployments.
 DB_SKIP_INIT_DDL = os.getenv("DB_SKIP_INIT_DDL", "").strip().lower() in ("1", "true", "yes", "on")
+
+# Cloud SQL IAM database authentication (Postgres). When true, DB_PASSWORD is
+# ignored; instead each new connection uses a short-lived OAuth2 access token
+# (scope sqlservice.login) as the password over TLS — mirroring how the RExI
+# Java app (GooglePool) connects to rexi.db.internal as the gke-rexi-sa IAM user.
+DB_IAM_AUTH = os.getenv("DB_IAM_AUTH", "").strip().lower() in ("1", "true", "yes", "on")
+
+_IAM_DB_SCOPE = "https://www.googleapis.com/auth/sqlservice.login"
+
+
+def _fetch_iam_db_token() -> str:
+    """Mint a fresh GCP access token to use as the Cloud SQL IAM DB password."""
+    import google.auth
+    from google.auth.transport.requests import Request
+
+    creds, _ = google.auth.default(scopes=[_IAM_DB_SCOPE])
+    creds.refresh(Request())
+    return creds.token
 
 
 def _db_engine_kind() -> str:
@@ -69,7 +89,9 @@ def get_engine_config() -> tuple[str, dict]:
             return url, {"unix_sock": pg_socket}
 
         host = db_host or "localhost"
-        url = f"postgresql+pg8000://{db_user}:{db_password}@{host}:{db_port}/{db_name}"
+        safe_user = quote_plus(db_user)
+        safe_pw = quote_plus(db_password)
+        url = f"postgresql+pg8000://{safe_user}:{safe_pw}@{host}:{db_port}/{db_name}"
         logger.info(f"Using direct Postgres connection: {host}:{db_port}/{db_name}")
         return url, {}
 
@@ -126,6 +148,20 @@ try:
             cur.close()
 
         engine = engine.execution_options(schema_translate_map={None: DB_SCHEMA})
+
+    # Cloud SQL IAM auth: inject a fresh access token as the password (and require
+    # TLS) on every new physical connection, so tokens never go stale in the pool.
+    if engine.dialect.name == "postgresql" and DB_IAM_AUTH:
+        _iam_ssl_ctx = ssl.create_default_context()
+        _iam_ssl_ctx.check_hostname = False
+        _iam_ssl_ctx.verify_mode = ssl.CERT_NONE
+
+        @event.listens_for(engine, "do_connect")
+        def _provide_iam_token(_dialect, _conn_rec, _cargs, cparams):
+            cparams["password"] = _fetch_iam_db_token()
+            cparams["ssl_context"] = _iam_ssl_ctx
+
+        logger.info("Cloud SQL IAM database authentication enabled (token-as-password + TLS)")
 
 except Exception as e:
     logger.warning(f"Could not create database engine: {e}")
