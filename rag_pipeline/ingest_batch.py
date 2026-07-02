@@ -27,6 +27,7 @@ from rag_pipeline.database import init_db, SessionLocal
 from rag_pipeline.automation.locking import DistributedLock, LockAlreadyHeld
 from rag_pipeline.automation.orchestrator import run_automated_ingestion
 from rag_pipeline.utils.logger import setup_logger
+from rag_pipeline.utils.secret_file import load_secret_file
 
 logger = setup_logger()
 
@@ -68,6 +69,12 @@ def _parse_args(argv=None) -> argparse.Namespace:
 
 def run(argv=None) -> int:
     args = _parse_args(argv)
+
+    # If secrets are provided as a mounted CSI properties file (rexi-app style),
+    # fold them into the environment. No-op when secrets arrive as env vars.
+    loaded = load_secret_file()
+    if loaded:
+        logger.info(f"Loaded {len(loaded)} secret(s) from properties file: {', '.join(sorted(loaded))}")
 
     doc_id_list = None
     if args.document_ids:

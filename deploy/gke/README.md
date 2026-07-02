@@ -44,68 +44,65 @@ tables (`rag_chunks`, `document_ingestion_state`) already exist.
 > failure there rolls back everything. If you'd rather manage one role, run the
 > commented-out membership grant as the `postgres` superuser instead.
 
-### 2. Build + push the image (needs Artifact Registry write)
-`irvins@stanford.edu` lacks `artifactregistry.repositories.create/push` in
-`som-rit-phi-rexi-dev`, so this step needs someone with AR write (or the
-existing `som-rit-infrastructure-prod/rexi` CI). The image is plain amd64 and
-builds from the repo root (verified):
+### 2. Image (handled by CI — no manual build)
+The `rag_scrape_pipeline` GitHub Action (`.github/workflows/push_docker.yaml`)
+builds and pushes the amd64 image on every push to `main`:
 
-```bash
-# Pick a registry the rexi-cluster node SA can pull from. Two options:
-#   A) a new repo in rexi-dev (preferred — same project as the cluster), or
-#   B) the existing som-rit-infrastructure-prod/rexi repo used by rexi-app.
-
-# Option A — create the repo once (needs artifactregistry.admin on rexi-dev):
-gcloud artifacts repositories create rag-pipeline \
-  --repository-format=docker --location=us-west1 \
-  --project=som-rit-phi-rexi-dev
-
-REPO=us-west1-docker.pkg.dev/som-rit-phi-rexi-dev/rag-pipeline/ingest
-gcloud auth configure-docker us-west1-docker.pkg.dev
-
-# Build amd64 (GKE nodes are amd64) and push:
-docker buildx build --platform linux/amd64 -t "$REPO:$(git rev-parse --short HEAD)" -t "$REPO:latest" --push .
+```
+us-west1-docker.pkg.dev/som-rit-infrastructure-prod/rexi-rag-pipeline/rag-pipeline
 ```
 
-Then set `spec.jobTemplate...containers[0].image` in `cronjob.yaml` to the
-pushed tag. If you use Option A, also grant the node SA read:
+tagged `latest`, `build-<run#>`, `sha-<sha>`. The `rexi-cluster` node SA already
+pulls from this registry (same project as `rexi-app`'s image). Nothing to do
+here beyond merging to `main`.
 
-```bash
-gcloud artifacts repositories add-iam-policy-binding rag-pipeline \
-  --location=us-west1 --project=som-rit-phi-rexi-dev \
-  --member="serviceAccount:rexi-gke-nodes-sa@som-rit-phi-rexi-dev.iam.gserviceaccount.com" \
-  --role=roles/artifactregistry.reader
-```
+### 3. Create the Secret (out-of-band — never commit values)
+The pod needs two secret values as env vars. Create a plain Kubernetes Secret
+(requires `container.secrets.create`, i.e. `roles/container.developer`):
 
-### 3. Create the Secret (don't commit values)
 ```bash
 kubectl -n rexi create secret generic rag-pipeline-secrets \
   --from-literal=AI_HUB_API_KEY="<aihub key>" \
   --from-literal=SHAREPOINT_SITE_REXI_CLIENT_SECRET="$(gcloud secrets versions access latest \
       --secret=SHAREPOINT_CLIENT_SECRET --project=som-rit-phi-redcap-prod)"
 ```
+
 (The AI Hub key is the same one `rexi-app` uses — `ai.api.key` in its
-`gke-app-sa-secrets`.) Preferably wire both through the Secret Store CSI driver
-like the `rexi-app` `secret-provider` SecretProviderClass instead of a raw Secret.
+`gke-app-sa-secrets`.)
 
-## Apply
+**Long-term:** replace this raw Secret with the Secret Store CSI file mount like
+`rexi-app`'s `secret-provider` SecretProviderClass. The container already reads
+`/var/secrets/secret.properties` if mounted (see `rag_pipeline/utils/secret_file.py`),
+so that swap is a manifest-only change — no image rebuild.
 
-```bash
-kubectl apply -f deploy/gke/configmap.yaml
-# (Secret created in step 3 above)
-kubectl apply -f deploy/gke/cronjob.yaml
-```
+## Deploy (Flux GitOps — not `kubectl apply`)
+
+The `rexi` namespace is reconciled by Flux from
+[`susom/rexi-deploy`](https://github.com/susom/rexi-deploy/tree/main/som-rit-phi-rexi-dev).
+The canonical CronJob + ConfigMap manifest lives there as `rag-pipeline.yaml`
+(mirrors `configmap.yaml` + `cronjob.yaml` in this dir). To deploy: open a PR
+adding/updating that file; on merge Flux applies it within ~10 min. The Secret
+from step 3 is created out-of-band and referenced by name (`envFrom`), so no
+secret values ever land in git.
+
+The `configmap.yaml` / `cronjob.yaml` here are the source-of-truth reference for
+what that Flux manifest should contain.
 
 ## First run — dry run before real ingest
 
-De-risk by exercising sourcing + dedup with **no writes** first:
+Once the manifest is merged (Flux applied) and the Secret exists, de-risk by
+exercising sourcing + dedup with **no writes** first. These `kubectl` commands
+need `container.jobs.create` (`roles/container.developer`); if you only have
+read access, ask someone who can create Jobs, or just let the nightly schedule
+run and watch logs (`kubectl -n rexi logs job/<name> -f`, read-only is enough).
 
 ```bash
 kubectl -n rexi create job rexi-dryrun --from=cronjob/rag-pipeline-rexi
 # then edit the job command to add --dry-run, OR run a one-off:
 kubectl -n rexi run rexi-dryrun --rm -it --restart=Never \
-  --image=<your image> --serviceaccount=gke-rexi-sa \
-  --overrides='{"spec":{"containers":[{"name":"x","image":"<your image>","envFrom":[{"configMapRef":{"name":"rag-pipeline-config"}},{"secretRef":{"name":"rag-pipeline-secrets"}}],"command":["python","-m","rag_pipeline.ingest_batch","--site","rexi","--days-back","3650","--dry-run"]}]}}'
+  --image=us-west1-docker.pkg.dev/som-rit-infrastructure-prod/rexi-rag-pipeline/rag-pipeline:latest \
+  --serviceaccount=gke-rexi-sa \
+  --overrides='{"spec":{"containers":[{"name":"x","image":"us-west1-docker.pkg.dev/som-rit-infrastructure-prod/rexi-rag-pipeline/rag-pipeline:latest","envFrom":[{"configMapRef":{"name":"rag-pipeline-config"}},{"secretRef":{"name":"rag-pipeline-secrets"}}],"command":["python","-m","rag_pipeline.ingest_batch","--site","rexi","--days-back","3650","--dry-run"]}]}}'
 ```
 
 Check logs:
@@ -128,9 +125,9 @@ FROM rexi.document_ingestion_state ORDER BY last_seen_at DESC LIMIT 20;
 - **Embedding model is fixed** at `text-embedding-3-small` (1536-dim) to match
   the vectors RExI queries `rag_chunks` with. Changing it requires re-embedding
   the whole table.
-- **GitOps**: the `rexi` namespace is Flux-managed. If you want this CronJob
-  reconciled by Flux, add these manifests to the Flux source repo instead of
-  `kubectl apply`.
+- **GitOps**: the `rexi` namespace is Flux-managed. The CronJob is deployed by
+  committing `rag-pipeline.yaml` to `susom/rexi-deploy/som-rit-phi-rexi-dev/`
+  (not `kubectl apply`). Flux reconciles the whole directory on merge to `main`.
 - **Library drive IDs** in `configmap.yaml` cover the 8 named workflow libraries
   (Budget, Issuance of Award & Activation, Pre-startup, Prologue, Exploration,
   Regulatory, Startup, Contract). The default "Documents" and "TEST RExI"

@@ -37,9 +37,10 @@ spec:
               value: amd64
           containers:
             - name: ingest
-              # TODO: set to the pushed image (see deploy/gke/README.md).
-              image: us-west1-docker.pkg.dev/som-rit-phi-rexi-dev/rag-pipeline/ingest:latest
-              imagePullPolicy: IfNotPresent
+              # Built + pushed by the rag_scrape_pipeline GitHub Action.
+              # Canonical deploy copy lives in susom/rexi-deploy (Flux).
+              image: us-west1-docker.pkg.dev/som-rit-infrastructure-prod/rexi-rag-pipeline/rag-pipeline:latest
+              imagePullPolicy: Always
               command:
                 - python
                 - -m
