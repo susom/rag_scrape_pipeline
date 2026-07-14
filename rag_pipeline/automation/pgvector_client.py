@@ -1,25 +1,25 @@
 """
-pgvector RAG client — writes documents DIRECTLY into the RExI rag_chunk table.
+pgvector RAG client — writes documents DIRECTLY into the RExI rag_chunks table.
 
 Drop-in replacement for rag_client.store_document / delete_document when
 RAG_BACKEND=pgvector.  The pipeline already connects to the RExI Postgres
-(rexi_db) for ingestion tracking, and rag_chunk lives in the SAME database,
+(rexi_db) for ingestion tracking, and rag_chunks lives in the SAME database,
 so we embed via AI Hub and INSERT directly — no HTTP call, no IAP auth, no
 dependency on the RExI backend being up.
 
 This mirrors RExI's PgVectorRagService.ingest exactly:
-  - dense:  AI Hub text-embedding-3-small (1536) -> rag_chunk.dense_vec
-  - sparse: to_tsvector('english', text)         -> rag_chunk.ts_vec
+  - dense:  AI Hub text-embedding-3-small (1536) -> rag_chunks.dense_vec
+  - sparse: to_tsvector('english', text)         -> rag_chunks.ts_vec
   - id:     server-generated uuid (gen_random_uuid)
 
 RExI's /api/ai/rag/ingest endpoint remains available for one-off/ad-hoc work;
 both paths write the same table with the same embedding model and ts config.
 
 Environment variables:
-  PGVECTOR_NAMESPACE     rag_chunk.namespace value (default: rexi_knowledge).
-  PGVECTOR_TABLE         Table name (default: rag_chunk).
+  PGVECTOR_NAMESPACE     rag_chunks.namespace value (default: rexi_knowledge).
+  PGVECTOR_TABLE         Table name (default: rag_chunks).
   AI_HUB_EMBEDDING_URL   AI Hub embeddings URL (used by aihub_client.embed).
-  DB_SCHEMA              Schema holding rag_chunk (default: rexi).
+  DB_SCHEMA              Schema holding rag_chunks (default: rexi).
 """
 
 import json
@@ -42,13 +42,13 @@ DEFAULT_NAMESPACE = os.getenv("PGVECTOR_NAMESPACE", "rexi_knowledge")
 
 
 def _table_ref() -> str:
-    """Schema-qualified rag_chunk reference (falls back to unqualified).
+    """Schema-qualified rag_chunks reference (falls back to unqualified).
 
-    RExI's Liquibase migrations own this table and name it ``rag_chunk``
-    (singular); the pipeline runs with DB_SKIP_INIT_DDL so it never creates
+    RExI's Liquibase migrations own this table and name it ``rag_chunks``
+    (plural); the pipeline runs with DB_SKIP_INIT_DDL so it never creates
     it. The name is overridable via PGVECTOR_TABLE in case RExI renames it.
     """
-    table = os.getenv("PGVECTOR_TABLE", "rag_chunk")
+    table = os.getenv("PGVECTOR_TABLE", "rag_chunks")
     schema = DB_SCHEMA or os.getenv("DB_SCHEMA", "rexi")
     return f'"{schema}".{table}' if schema else table
 
@@ -67,7 +67,7 @@ def store_document(
     namespace: Optional[str] = None,
 ) -> Dict:
     """
-    Embed `content` via AI Hub and INSERT a row into rag_chunk.
+    Embed `content` via AI Hub and INSERT a row into rag_chunks.
 
     Interface mirrors rag_client.store_document so orchestrator.py swaps backends
     with a single import change. Returns the server-generated uuid as vector_id
@@ -129,7 +129,7 @@ def delete_document(
     api_token: Optional[str] = None,
 ) -> Dict:
     """
-    Delete a chunk from rag_chunk by id. Used by orchestrator cleanup loops to
+    Delete a chunk from rag_chunks by id. Used by orchestrator cleanup loops to
     remove stale vectors after a re-ingestion. Missing rows are treated as success.
     """
     if engine is None:
