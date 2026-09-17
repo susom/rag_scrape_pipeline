@@ -14,7 +14,7 @@ python -m rag_pipeline.ingest_batch --site rexi --days-back 1
 
 `ingest_batch.py`: init DB (no DDL) → acquire DistributedLock → fetch changed
 approved docs from the RExI workflow libraries → extract via AI Hub → embed +
-INSERT into `rexi.rag_chunks` → update tracker list + `document_ingestion_state`.
+INSERT into `rexi.rag_chunk` → update tracker list + `document_ingestion_state`.
 
 Toggles (all in `configmap.yaml`): `AI_BACKEND=aihub`, `RAG_BACKEND=pgvector`,
 `DB_ENGINE=postgresql` + `DB_IAM_AUTH=true` + `DB_SKIP_INIT_DDL=true`. With these
@@ -36,7 +36,7 @@ MySQL), so nothing here affects the live SOM leg.
 Paste the contents of [`db_readiness.sql`](./db_readiness.sql). It creates
 `rexi.ingestion_locks` and grants schema/table/sequence privileges directly to
 the pod's IAM DB user (`gke-rexi-sa@som-rit-phi-rexi-dev.iam`). The other two
-tables (`rag_chunks`, `document_ingestion_state`) already exist.
+tables (`rag_chunk`, `document_ingestion_state`) already exist.
 
 > Object privileges are granted directly to the IAM user rather than via
 > `GRANT rexi_app TO <iam user>` — that role-membership grant needs ADMIN on
@@ -115,7 +115,7 @@ real run (`kubectl -n rexi create job rexi-manual --from=cronjob/rag-pipeline-re
 and verify rows land:
 
 ```sql
-SELECT count(*) FROM rexi.rag_chunks WHERE namespace = 'rexi_knowledge';
+SELECT count(*) FROM rexi.rag_chunk WHERE namespace = 'rexi_knowledge';
 SELECT document_id, rag_ingestion_status, rag_last_ingested_at
 FROM rexi.document_ingestion_state ORDER BY last_seen_at DESC LIMIT 20;
 ```
@@ -123,7 +123,7 @@ FROM rexi.document_ingestion_state ORDER BY last_seen_at DESC LIMIT 20;
 ## Notes
 
 - **Embedding model is fixed** at `text-embedding-3-small` (1536-dim) to match
-  the vectors RExI queries `rag_chunks` with. Changing it requires re-embedding
+  the vectors RExI queries `rag_chunk` with. Changing it requires re-embedding
   the whole table.
 - **GitOps**: the `rexi` namespace is Flux-managed. The CronJob is deployed by
   committing `rag-pipeline.yaml` to `susom/rexi-deploy/som-rit-phi-rexi-dev/`

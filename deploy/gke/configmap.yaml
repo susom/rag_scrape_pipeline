@@ -11,9 +11,13 @@ data:
   AI_HUB_BASE_URL: "https://aihubapi.stanfordhealthcare.org/azure-openai/deployments/gpt-4-1/chat/completions?api-version=2024-06-01"
   AI_HUB_EMBEDDING_URL: "https://aihubapi.stanfordhealthcare.org/azure-openai/deployments/text-embedding-3-small/embeddings?api-version=2024-06-01"
 
-  # ---- RAG store: write chunks directly into rexi.rag_chunks (pgvector) ----
+  # ---- RAG store: write chunks directly into rexi.rag_chunk (pgvector) ----
+  # Table name MUST match RExI's Liquibase table (changeset rexi:create-rag-chunks
+  # in baseline.sql), which is `rag_chunk` (singular). Pinned explicitly so the
+  # pipeline and RExI's PgVectorRagService read/write the SAME table.
   RAG_BACKEND: "pgvector"
   PGVECTOR_NAMESPACE: "rexi_knowledge"
+  PGVECTOR_TABLE: "rag_chunk"
 
   # ---- Tracking DB: Cloud SQL Postgres (rexi_db) via private DNS + IAM auth ----
   DB_ENGINE: "postgresql"

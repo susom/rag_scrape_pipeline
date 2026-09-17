@@ -8,7 +8,7 @@ Context:
 - Cluster: `rexi-cluster` (GKE Autopilot, region `us-west1`, project `som-rit-phi-rexi-dev`)
 - Namespace: `rexi` (same as the RExI app)
 - The CronJob runs `python -m rag_pipeline.ingest_batch --site rexi --days-back 1`
-  as the `gke-rexi-sa` Workload Identity SA, writing to `rexi.rag_chunks`.
+  as the `gke-rexi-sa` Workload Identity SA, writing to `rexi.rag_chunk`.
 - DB readiness SQL has already been run (✅ `ingestion_locks` + grants exist).
 
 All commands are run from the **content_pipeline repo root** unless noted.
@@ -140,7 +140,7 @@ kubectl -n rexi logs -f job/rexi-manual
 
 ```sql
 -- Chunks written by the pipeline:
-SELECT count(*) FROM rexi.rag_chunks WHERE namespace = 'rexi_knowledge';
+SELECT count(*) FROM rexi.rag_chunk WHERE namespace = 'rexi_knowledge';
 
 -- Per-document ingestion state (dedup/version ledger):
 SELECT document_id, rag_ingestion_status, sections_processed, sections_total,

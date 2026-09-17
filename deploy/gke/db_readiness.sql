@@ -18,7 +18,7 @@ CREATE INDEX IF NOT EXISTS ix_ingestion_locks_expires_at
     ON rexi.ingestion_locks (expires_at);
 
 -- 2) Let the application role use the schema + tables + sequences.
---    (rag_chunks and document_ingestion_state were already granted to rexi_app;
+--    (rag_chunk and document_ingestion_state were already granted to rexi_app;
 --     these statements are idempotent and also cover the new lock table.)
 GRANT USAGE ON SCHEMA rexi TO rexi_app;
 GRANT SELECT, INSERT, UPDATE, DELETE ON rexi.ingestion_locks TO rexi_app;
@@ -35,7 +35,7 @@ GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA rexi
 GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA rexi
     TO "gke-rexi-sa@som-rit-phi-rexi-dev.iam";
 
--- 4) Sanity check — should list rag_chunks, document_ingestion_state, ingestion_locks.
+-- 4) Sanity check — should list rag_chunk, document_ingestion_state, ingestion_locks.
 SELECT tablename FROM pg_tables WHERE schemaname = 'rexi' ORDER BY tablename;
 
 -- ----------------------------------------------------------------------------
