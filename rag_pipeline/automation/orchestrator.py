@@ -11,6 +11,7 @@ Coordinates:
 
 import os
 import json
+import hashlib
 import re
 from datetime import datetime, timezone
 from zoneinfo import ZoneInfo
@@ -25,6 +26,8 @@ from rag_pipeline.automation.content_fetcher import (
     SharePointFile,
     get_page_content,
     update_tracker_list,
+    STATUS_SUCCESS,
+    STATUS_RETRY,
 )
 from rag_pipeline.sharepoint import SharePointGraphClient, get_site_config
 from rag_pipeline.processing.text_extraction import extract_text_from_file, get_thinker_name
@@ -33,6 +36,7 @@ from rag_pipeline.main import run_pipeline
 from rag_pipeline.output_json import write_canonical_json
 from rag_pipeline.scraping.scraper import scrape_url
 from rag_pipeline.utils.logger import setup_logger
+from rag_pipeline.utils.env import sharepoint_writeback_enabled
 
 # RAG_BACKEND=pgvector → push to pgvector postgres via RExI /rag/ingest endpoint
 # RAG_BACKEND=pinecone (default) → push to Pinecone via REDCap EM API
@@ -150,6 +154,10 @@ class IngestionOrchestrator:
         self._url_content_hashes: Dict[str, bytes] = {}  # document_id → hash of raw scraped text
         self._tracker_metadata: Dict[str, Dict[str, str]] = {}
         self._source_uri_to_document_id: Dict[str, str] = {}
+        self._source_modified_at: Dict[str, Optional[datetime]] = {}
+        self._source_files: Dict[str, SharePointFile] = {}
+        self._file_inputs: Dict[str, Tuple[bytes, str]] = {}
+        self._file_content_hashes: Dict[str, bytes] = {}
 
     def _get_sp_client(self) -> SharePointGraphClient:
         """Lazy-initialize SharePoint client for file downloads."""
@@ -185,6 +193,7 @@ class IngestionOrchestrator:
         try:
             logger.info("Starting automated ingestion run")
             logger.info(f"Mode: {'DRY RUN' if self.dry_run else 'LIVE'}")
+            logger.info("SharePoint write-back enabled: %s", sharepoint_writeback_enabled())
             logger.info(f"Force reprocess: {force_reprocess}")
             if document_ids:
                 logger.info(f"Filtering to {len(document_ids)} document(s)")
@@ -220,6 +229,7 @@ class IngestionOrchestrator:
                 )
 
             if not documents_to_process:
+                self._flush_sharepoint_writebacks(document_ids)
                 logger.info("No documents to process - all up to date")
                 return self._build_result(
                     status="completed",
@@ -250,6 +260,7 @@ class IngestionOrchestrator:
             # Step 4: Ingest sections into vector database
             logger.info("Ingesting sections into RAG vector database...")
             ingestion_stats = self._ingest_to_rag(processed_documents)
+            self._flush_sharepoint_writebacks(document_ids)
 
             # Step 5: Build summary
             result = self._build_result(
@@ -321,8 +332,8 @@ class IngestionOrchestrator:
         if the page was modified after our last processing, queue it. No download
         or hashing needed; the Graph API timestamp is authoritative.
 
-        For SharePoint files: uses lastModifiedDateTime and last_processed_at to
-        skip unchanged files when available.
+        For SharePoint files: successful source timestamps avoid downloads; when
+        metadata changes, an extracted-text hash avoids re-embedding identical content.
 
         For external URLs: scrapes page → hashes text → compares to DB.
         No "last modified" metadata available, so hash is the only option.
@@ -330,8 +341,6 @@ class IngestionOrchestrator:
         documents_to_process = []
 
         # --- SharePoint pages ---
-        # The pages are already date-filtered by content_fetcher — every page returned
-        # was published and modified within the requested window. Process them all; no DB check needed.
         for sp_page in sharepoint_pages:
             document_id = DocumentIngestionState.generate_document_id(
                 title=sp_page.title or sp_page.name,
@@ -339,6 +348,11 @@ class IngestionOrchestrator:
             )
 
             if filter_ids and document_id not in filter_ids:
+                continue
+
+            self._source_modified_at[document_id] = _ensure_aware(sp_page.last_modified)
+            if not self._should_process_sharepoint(document_id, sp_page.last_modified, force_reprocess):
+                self._update_last_seen(document_id)
                 continue
 
             documents_to_process.append({
@@ -355,9 +369,6 @@ class IngestionOrchestrator:
 
         # --- SharePoint files (document libraries) ---
         for sp_file in sharepoint_files:
-            if not sp_file.download_url:
-                logger.warning(f"Skipping file without download URL: {sp_file.file_name}")
-                continue
             document_id = DocumentIngestionState.generate_document_id(
                 title=sp_file.file_name,
                 url=sp_file.url,
@@ -366,17 +377,11 @@ class IngestionOrchestrator:
             if filter_ids and document_id not in filter_ids:
                 continue
 
-            if not force_reprocess and sp_file.last_modified:
-                existing = self.db.query(DocumentIngestionState).filter(
-                    DocumentIngestionState.document_id == document_id,
-                    DocumentIngestionState.rag_namespace == self.db_namespace,
-                ).first()
-
-                last_modified = _ensure_aware(sp_file.last_modified)
-                last_processed = _ensure_aware(existing.last_processed_at) if existing else None
-                if existing and last_processed and last_modified and last_modified <= last_processed:
-                    self._update_last_seen(document_id)
-                    continue
+            self._source_modified_at[document_id] = _ensure_aware(sp_file.last_modified)
+            self._source_files[document_id] = sp_file
+            if not self._should_process_sharepoint_file(document_id, sp_file, force_reprocess):
+                self._update_last_seen(document_id)
+                continue
 
             documents_to_process.append({
                 "document_id": document_id,
@@ -456,6 +461,110 @@ class IngestionOrchestrator:
 
         return documents_to_process
 
+    def _read_file_input(self, document_id: str, source: SharePointFile) -> Tuple[bytes, str]:
+        if document_id not in self._file_inputs:
+            if not source.download_url:
+                raise ValueError("SharePoint file has no download URL")
+            raw = self._get_sp_client().download_file_content(source.download_url)
+            extracted = extract_text_from_file(source.file_name, raw)
+            if not extracted:
+                raise ValueError(f"No text extracted from SharePoint file {source.file_name}")
+            self._file_inputs[document_id] = (raw, extracted)
+            self._file_content_hashes[document_id] = DocumentIngestionState.compute_content_hash(extracted)
+        return self._file_inputs[document_id]
+
+    def _should_process_sharepoint_file(
+        self, document_id: str, source: SharePointFile, force_reprocess: bool
+    ) -> bool:
+        if not self._should_process_sharepoint(document_id, source.last_modified, force_reprocess):
+            return False
+        if force_reprocess:
+            return True
+        existing = self.db.query(DocumentIngestionState).filter(
+            DocumentIngestionState.document_id == document_id,
+            DocumentIngestionState.rag_namespace == self.db_namespace,
+        ).first()
+        if existing and existing.rag_ingestion_status in {"completed", "permanently_failed"}:
+            try:
+                self._read_file_input(document_id, source)
+            except Exception as e:
+                logger.warning("Cannot compare source text for %s; queueing an ingestion attempt: %s", document_id, e)
+                return True
+            if self._file_content_hashes[document_id] == existing.content_hash:
+                logger.info("Source text unchanged after metadata edit: %s", document_id)
+                if not self.dry_run:
+                    if existing.rag_ingestion_status == "completed":
+                        existing.source_modified_at = _ensure_aware(source.last_modified)
+                    existing.source_attempt_modified_at = _ensure_aware(source.last_modified)
+                    self.db.commit()
+                return False
+        return True
+
+    def _source_target(self, document_id: str, content_hash: Optional[bytes]) -> dict:
+        source = self._source_files.get(document_id)
+        if not source or not source.drive_id or not source.file_id:
+            raise ValueError("Cannot resolve source library item; run a full approved-file scan")
+        return {
+            "drive_id": source.drive_id,
+            "item_id": source.file_id,
+            "content_hash": content_hash.hex() if content_hash is not None else None,
+            "approval_field": source.approval_field,
+        }
+
+    def _upgrade_pending_source(self, record: DocumentIngestionState, payload: dict) -> dict:
+        """Attach source identity/hash to tracker-only payloads saved by older code."""
+        source = self._source_files.get(record.document_id)
+        if not source or not source.drive_id:
+            raise ValueError("Pending tracker update has no source identity; run a full approved-file scan")
+        client = self._get_sp_client()
+        before = client.get_drive_item(source.drive_id, source.file_id)
+        modified = datetime.fromisoformat(before["lastModifiedDateTime"].replace("Z", "+00:00"))
+        if _ensure_aware(modified) != _ensure_aware(record.source_modified_at):
+            raise ValueError("Legacy source revision changed; re-ingest before adding its mirror")
+        if not before.get("eTag") or not before.get("@microsoft.graph.downloadUrl"):
+            raise ValueError("Cannot verify legacy source revision without ETag and download URL")
+        raw = client.download_file_content(before["@microsoft.graph.downloadUrl"])
+        extracted = extract_text_from_file(before["name"], raw)
+        if not extracted:
+            raise ValueError("Cannot fingerprint empty legacy source content")
+        after = client.get_drive_item(source.drive_id, source.file_id)
+        if before["eTag"] != after.get("eTag"):
+            raise ValueError("Legacy source changed while preparing write-back; will retry")
+        fingerprint = DocumentIngestionState.compute_content_hash(extracted)
+        payload["source"] = self._source_target(record.document_id, fingerprint)
+        record.content_hash = fingerprint
+        record.sharepoint_writeback_payload = json.dumps(payload)
+        self.db.commit()
+        return payload
+
+    def _should_process_sharepoint(
+        self, document_id: str, modified_at: Optional[datetime], force_reprocess: bool
+    ) -> bool:
+        if force_reprocess:
+            return True
+        existing = self.db.query(DocumentIngestionState).filter(
+            DocumentIngestionState.document_id == document_id,
+            DocumentIngestionState.rag_namespace == self.db_namespace,
+        ).first()
+        if not existing:
+            return True
+        modified_at = _ensure_aware(modified_at)
+        successful_revision = _ensure_aware(existing.source_modified_at)
+        if (
+            existing.rag_ingestion_status == "completed"
+            and modified_at and successful_revision
+            and modified_at <= successful_revision
+        ):
+            return False
+        attempted_revision = _ensure_aware(existing.source_attempt_modified_at)
+        if existing.rag_ingestion_status == "permanently_failed" and (
+            modified_at is None
+            or (attempted_revision and modified_at <= attempted_revision)
+        ):
+            logger.error("Retry limit reached for %s; use force_reprocess to retry", document_id)
+            return False
+        return True
+
     def _should_process_url(
         self,
         document_id: str,
@@ -480,6 +589,12 @@ class IngestionOrchestrator:
         new_hash = DocumentIngestionState.compute_content_hash(content)
         if new_hash != existing.content_hash:
             logger.info(f"URL content changed: {source_uri}")
+            return True
+
+        if existing.rag_ingestion_status == "permanently_failed":
+            logger.error("Retry limit reached for %s; use force_reprocess to retry", document_id)
+            return False
+        if existing.rag_ingestion_status != "completed":
             return True
 
         logger.debug(f"URL unchanged: {source_uri}")
@@ -721,8 +836,14 @@ class IngestionOrchestrator:
                 if not download_url:
                     raise ValueError(f"No download_url for {file_name}")
                 client = self._get_sp_client()
-                file_bytes = client.download_file_content(download_url)
-                extracted_text = extract_text_from_file(file_name, file_bytes)
+                document_id = doc["document_id"]
+                if document_id in self._file_inputs:
+                    file_bytes, extracted_text = self._file_inputs.pop(document_id)
+                else:
+                    file_bytes = client.download_file_content(download_url)
+                    extracted_text = extract_text_from_file(file_name, file_bytes)
+                if extracted_text:
+                    self._file_content_hashes[document_id] = DocumentIngestionState.compute_content_hash(extracted_text)
             except Exception as e:
                 logger.error(f"Failed to download/extract {file_name}: {e}")
                 self.errors.append({
@@ -967,11 +1088,6 @@ class IngestionOrchestrator:
             source_type = doc["source"]["type"]
             sections = doc.get("sections", [])
 
-            if not sections:
-                logger.warning(f"No sections to ingest for {doc_id}")
-                stats["documents_skipped"] += 1
-                continue
-
             logger.info(f"Ingesting {len(sections)} section(s) from {doc_id}")
 
             document_id = self._source_uri_to_document_id.get(source_uri) or doc.get("document_id")
@@ -990,13 +1106,20 @@ class IngestionOrchestrator:
             # Compute content hash:
             # - URL docs: use the hash of raw scraped text cached during delta detection,
             #   so the stored hash matches what delta detection will compare next run.
-            # - SP docs: compute from section text (timestamp is the authoritative
-            #   change signal for SharePoint, hash is stored for reference only).
-            if document_id in self._url_content_hashes:
+            # - SP files: hash pre-AI source text so metadata-only writes never
+            #   trigger extraction/embedding loops across environments.
+            if document_id in self._file_content_hashes:
+                content_hash = self._file_content_hashes[document_id]
+            elif document_id in self._url_content_hashes:
                 content_hash = self._url_content_hashes[document_id]
             else:
                 full_text = "\n\n".join(s.get("text", "") for s in sections)
-                content_hash = DocumentIngestionState.compute_content_hash(full_text)
+                if full_text:
+                    content_hash = DocumentIngestionState.compute_content_hash(full_text)
+                elif db_record:
+                    content_hash = db_record.content_hash
+                else:
+                    content_hash = hashlib.sha256(b"").digest()
 
             if not db_record:
                 db_record = DocumentIngestionState(
@@ -1004,8 +1127,8 @@ class IngestionOrchestrator:
                     content_hash=content_hash,
                     file_name=source_uri.split("/")[-1] if source_uri else None,
                     url=source_uri,
-                    last_processed_at=datetime.now(timezone.utc),
                     last_content_update_at=datetime.now(timezone.utc),
+                    source_attempt_modified_at=self._source_modified_at.get(document_id),
                     rag_ingestion_status="processing",
                     rag_namespace=self.db_namespace,
                     sections_total=len(sections),
@@ -1014,11 +1137,20 @@ class IngestionOrchestrator:
                 self.db.flush()
             else:
                 # Update existing record
+                source_revision = self._source_modified_at.get(document_id)
+                if document_id in self._file_content_hashes:
+                    revision_changed = content_hash != db_record.content_hash
+                elif document_id in self._source_modified_at:
+                    revision_changed = source_revision != _ensure_aware(db_record.source_attempt_modified_at)
+                else:
+                    revision_changed = content_hash != db_record.content_hash
+                if revision_changed:
+                    db_record.rag_retry_count = 0
                 db_record.content_hash = content_hash
                 db_record.last_content_update_at = datetime.now(timezone.utc)
+                db_record.source_attempt_modified_at = source_revision
                 db_record.rag_ingestion_status = "processing"
                 db_record.sections_total = len(sections)
-                db_record.last_processed_at = datetime.now(timezone.utc)
                 self.db.flush()
 
             # Load old vector IDs for cleanup after successful re-ingestion
@@ -1034,7 +1166,9 @@ class IngestionOrchestrator:
 
             # Ingest each section
             sections_succeeded = 0
-            section_errors = []
+            section_errors = [{"error": error} for error in doc.get("errors", [])]
+            if not sections:
+                section_errors.append({"error": "No usable sections extracted"})
             new_vector_ids = []
 
             for section in sections:
@@ -1073,59 +1207,17 @@ class IngestionOrchestrator:
 
             # Update database record with results
             db_record.sections_processed = sections_succeeded
-            db_record.rag_last_ingested_at = datetime.now(timezone.utc)
 
-            if sections_succeeded == len(sections):
+            succeeded = bool(sections) and sections_succeeded == len(sections) and not doc.get("errors")
+            if succeeded:
                 # All sections succeeded
                 db_record.rag_ingestion_status = "completed"
                 db_record.rag_error_message = None
                 db_record.rag_retry_count = 0
+                db_record.last_processed_at = datetime.now(timezone.utc)
+                db_record.rag_last_ingested_at = db_record.last_processed_at
+                db_record.source_modified_at = self._source_modified_at.get(document_id)
                 stats["documents_processed"] += 1
-
-                # Update SharePoint tracker list
-                doc_title = source_uri.split("/")[-1] if source_uri else doc_id
-                try:
-                    tracker_meta = self._tracker_metadata.get(document_id)
-                    content_section = None
-                    document_title = None
-                    modified_by = None
-                    document_modified = None
-                    document_modified_by = None
-                    document_created = None
-                    approver = None
-                    summary_notes = None
-                    ingestion_date = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
-                    increment_version = False
-
-                    if tracker_meta:
-                        content_section = tracker_meta.get("content_section") or None
-                        document_title = tracker_meta.get("document_title") or doc_title
-                        modified_by = tracker_meta.get("modified_by") or None
-                        document_modified = tracker_meta.get("document_modified") or None
-                        document_modified_by = tracker_meta.get("document_modified_by") or None
-                        document_created = tracker_meta.get("document_created") or None
-                        approver = tracker_meta.get("approver") or None
-                        summary_notes = "\n".join(doc.get("errors", [])) if doc.get("errors") else "Ingested successfully"
-                        increment_version = True
-                    vector_id = new_vector_ids[0] if new_vector_ids else None
-                    update_tracker_list(
-                        title=doc_title,
-                        url=source_uri,
-                        vector_id=vector_id,
-                        site_name=self.site_name,
-                        content_section=content_section,
-                        document_title=document_title,
-                        modified_by=modified_by,
-                        document_modified=document_modified,
-                        document_modified_by=document_modified_by,
-                        document_created=document_created,
-                        approver=approver,
-                        summary=summary_notes,
-                        ingestion_date=ingestion_date,
-                        increment_version=increment_version,
-                    )
-                except Exception as e:
-                    logger.warning(f"Failed to update tracker list: {e}")
 
                 # Store all new vector IDs as JSON array
                 db_record.rag_vector_ids = json.dumps(new_vector_ids)
@@ -1179,13 +1271,36 @@ class IngestionOrchestrator:
                     "error": "All sections failed to ingest",
                 })
 
+            # Persist status delivery for failures too, without advancing successful dates/versions.
+            tracker_meta = self._tracker_metadata.get(document_id, {})
+            writeback_payload = {
+                "title": source_uri.split("/")[-1] if source_uri else doc_id,
+                "url": source_uri,
+                "vector_id": new_vector_ids[0] if succeeded and new_vector_ids else None,
+                "site_name": self.site_name,
+                **tracker_meta,
+                "summary": STATUS_SUCCESS if succeeded else STATUS_RETRY,
+                "ingestion_succeeded": succeeded,
+                "attempted_at": db_record.last_content_update_at.isoformat(),
+                "ingestion_date": db_record.rag_last_ingested_at.isoformat(timespec="seconds").replace("+00:00", "Z") if succeeded else None,
+                "increment_version": bool(tracker_meta) and succeeded,
+            }
+            if document_id in self._source_files:
+                writeback_payload["source"] = self._source_target(
+                    document_id, self._file_content_hashes.get(document_id),
+                )
+            db_record.sharepoint_writeback_payload = json.dumps(writeback_payload)
+            db_record.sharepoint_writeback_error = None
+
             # Commit database changes for this document
             try:
                 self.db.commit()
             except Exception as e:
                 logger.error(f"Failed to commit database changes for {document_id}: {e}")
                 self.db.rollback()
-                stats["documents_failed"] += 1
+                if succeeded:
+                    stats["documents_processed"] -= 1
+                    stats["documents_failed"] += 1
                 self.errors.append({
                     "type": "database_error",
                     "document_id": document_id,
@@ -1193,6 +1308,46 @@ class IngestionOrchestrator:
                 })
 
         return stats
+
+    def _flush_sharepoint_writebacks(self, document_ids: Optional[List[str]] = None):
+        if self.dry_run or not sharepoint_writeback_enabled():
+            return
+        query = self.db.query(DocumentIngestionState).filter(
+            DocumentIngestionState.rag_namespace == self.db_namespace,
+            DocumentIngestionState.rag_ingestion_status.in_(["completed", "failed", "permanently_failed"]),
+            DocumentIngestionState.sharepoint_writeback_payload.isnot(None),
+        )
+        if document_ids:
+            query = query.filter(DocumentIngestionState.document_id.in_(document_ids))
+        for record in query.all():
+            document_id = record.document_id
+            try:
+                payload = json.loads(record.sharepoint_writeback_payload)
+                if payload.get("increment_version") and "source" not in payload:
+                    payload = self._upgrade_pending_source(record, payload)
+                if not update_tracker_list(**payload):
+                    raise RuntimeError("SharePoint tracker/mirror update was not confirmed; will retry")
+                record.sharepoint_writeback_payload = None
+                record.sharepoint_writeback_error = None
+            except Exception as e:
+                self.db.rollback()
+                record.sharepoint_writeback_error = str(e)
+                logger.error("SharePoint write-back failed for %s: %s", document_id, e)
+                self.errors.append({
+                    "type": "sharepoint_writeback_error",
+                    "document_id": document_id,
+                    "error": str(e),
+                })
+            try:
+                self.db.commit()
+            except Exception as e:
+                self.db.rollback()
+                logger.error("Could not commit write-back state for %s: %s", document_id, e)
+                self.errors.append({
+                    "type": "database_error",
+                    "document_id": document_id,
+                    "error": str(e),
+                })
 
     def _build_result(
         self,

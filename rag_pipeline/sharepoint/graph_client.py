@@ -19,6 +19,7 @@ from datetime import datetime
 from dataclasses import dataclass
 from rag_pipeline.utils.http import get_session
 from rag_pipeline.utils.logger import setup_logger
+from rag_pipeline.utils.env import sharepoint_writeback_enabled
 
 logger = setup_logger()
 
@@ -191,6 +192,7 @@ class SharePointGraphClient:
         params: Optional[dict] = None,
         json_data: Optional[dict] = None,
         use_beta: bool = False,
+        if_match: Optional[str] = None,
     ) -> dict:
         """
         Make an authenticated request to Graph API with retry logic.
@@ -210,10 +212,21 @@ class SharePointGraphClient:
             base = self.GRAPH_API_BETA if use_beta else self.GRAPH_API_BASE
             url = f"{base}{url}"
 
+        # Graph search uses POST but is read-only; other writes require explicit opt-in.
+        read_only = method.upper() in {"GET", "HEAD", "OPTIONS"} or (
+            method.upper() == "POST" and url == f"{self.GRAPH_API_BASE}/search/query"
+        )
+        if not read_only and not sharepoint_writeback_enabled():
+            logger.error("Blocked SharePoint mutation: SHAREPOINT_WRITEBACK_ENABLED=false")
+            raise PermissionError("SharePoint write-back is disabled")
+
         headers = {
             "Authorization": f"Bearer {self._get_access_token()}",
             "Content-Type": "application/json",
         }
+
+        if if_match:
+            headers["If-Match"] = if_match
 
         for attempt in range(self.MAX_RETRIES):
             try:
@@ -228,6 +241,8 @@ class SharePointGraphClient:
 
                 # Handle rate limiting
                 if response.status_code == 429:
+                    if attempt == self.MAX_RETRIES - 1:
+                        response.raise_for_status()
                     retry_after = int(response.headers.get("Retry-After", self.RETRY_DELAY * (attempt + 1)))
                     logger.warning(f"Rate limited. Retrying after {retry_after} seconds...")
                     time.sleep(retry_after)
@@ -243,7 +258,7 @@ class SharePointGraphClient:
                 else:
                     raise
 
-        return {}
+        raise RuntimeError("Graph request exhausted its retry attempts")
 
     def _paginate(
         self,
@@ -915,6 +930,20 @@ class SharePointGraphClient:
         url = f"/sites/{site_id}/drives/{drive_id}/list"
         return self._make_request("GET", url)
 
+    def get_drive_item(self, drive_id: str, item_id: str) -> dict:
+        """Read a file and its library fields, including concurrency tokens."""
+        return self._make_request(
+            "GET", f"/drives/{drive_id}/items/{item_id}",
+            params={"$expand": "listItem($expand=fields)"},
+        )
+
+    def get_list_item(self, list_id: str, item_id: str) -> dict:
+        site_id = self.get_site_id()
+        return self._make_request(
+            "GET", f"/sites/{site_id}/lists/{list_id}/items/{item_id}",
+            params={"$expand": "fields"},
+        )
+
     def get_drive_items(
         self,
         drive_id: Optional[str] = None,
@@ -1312,6 +1341,7 @@ class SharePointGraphClient:
         list_id: str,
         item_id: str,
         fields: dict,
+        if_match: Optional[str] = None,
     ) -> dict:
         """
         Update fields on a SharePoint list item.
@@ -1326,7 +1356,7 @@ class SharePointGraphClient:
         """
         site_id = self.get_site_id()
         url = f"/sites/{site_id}/lists/{list_id}/items/{item_id}/fields"
-        return self._make_request("PATCH", url, json_data=fields)
+        return self._make_request("PATCH", url, json_data=fields, if_match=if_match)
 
     def download_file_content(self, download_url: str) -> bytes:
         """

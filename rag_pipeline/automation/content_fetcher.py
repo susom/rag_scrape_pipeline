@@ -10,15 +10,22 @@ Coordinates fetching from:
 import os
 import re
 import html
+import hashlib
 import requests
+from decimal import Decimal, InvalidOperation
 from typing import List, Tuple, Optional, Dict, Any, Iterable
 from datetime import datetime, timezone
 from dataclasses import dataclass
 from rag_pipeline.sharepoint import SharePointGraphClient, get_site_config
 from rag_pipeline.utils.logger import setup_logger
+from rag_pipeline.utils.env import sharepoint_writeback_enabled
+from rag_pipeline.processing.text_extraction import extract_text_from_file
 
 logger = setup_logger()
 
+STATUS_SUCCESS = "Success"
+STATUS_RETRY = "Keep Trying"
+INGESTION_STATUSES = {STATUS_SUCCESS, STATUS_RETRY}
 
 # Cache of SharePointGraphClient instances keyed by site name. Reused across
 # calls so the per-instance OAuth token + site-id caches are shared instead of
@@ -76,6 +83,7 @@ class SharePointFile:
     library_name: Optional[str] = None
     parent_path: Optional[str] = None
     list_item_fields: Optional[dict] = None
+    approval_field: Optional[str] = None
 
 
 def extract_urls_from_text(text: str) -> List[str]:
@@ -613,6 +621,7 @@ def fetch_content_sources(
                         library_name=item.library_name,
                         parent_path=item.parent_path,
                         list_item_fields=item.list_item_fields,
+                        approval_field=site_config.approval_field,
                     ))
 
             if site_config.external_urls_file:
@@ -648,16 +657,111 @@ def _normalize_tracker_doc_title(value: Any) -> Optional[str]:
     return text or None
 
 
-def _increment_version(current_value: Any) -> int:
+def _version_number(value: Any) -> Decimal:
     try:
-        if current_value is None:
-            return 1
-        if isinstance(current_value, (int, float)):
-            return int(current_value) + 1
-        value_str = str(current_value).strip()
-        return int(value_str) + 1
-    except (ValueError, TypeError):
-        return 1
+        number = Decimal(str(value))
+    except InvalidOperation as e:
+        raise ValueError(f"Invalid RExI version: {value!r}") from e
+    if not number.is_finite() or number < 0:
+        raise ValueError(f"Invalid RExI version: {value!r}")
+    return number
+
+
+def _increment_version(current_value: Any) -> str:
+    number = Decimal(0) if current_value is None else _version_number(current_value)
+    return format(number + 1, "f")
+
+
+def _prepare_source_mirror(client: SharePointGraphClient, source: dict, status_only: bool = False) -> dict:
+    item = client.get_drive_item(source["drive_id"], source["item_id"])
+    library_item = item.get("listItem") or {}
+    fields = library_item.get("fields") or {}
+    if not _is_item_approved(fields, source.get("approval_field")):
+        raise ValueError("Source is no longer approved; refusing ingestion write-back")
+    if not library_item.get("id") or not library_item.get("eTag"):
+        raise ValueError("Source library item is missing its ID or ETag")
+    if status_only:
+        return item
+    download_url = item.get("@microsoft.graph.downloadUrl")
+    if not download_url:
+        raise ValueError("Source file has no download URL for write-back verification")
+    content = extract_text_from_file(item["name"], client.download_file_content(download_url))
+    fingerprint = hashlib.sha256(content.encode()).hexdigest()
+    if fingerprint != source["content_hash"]:
+        raise ValueError("Source content changed since ingestion; refusing stale write-back")
+    return item
+
+
+def _mirror_tracker_entry(
+    client: SharePointGraphClient,
+    tracker_list_id: str,
+    tracker_item_id: str,
+    field_names: dict,
+    source: dict,
+    source_item: dict,
+    ingestion_date: Optional[str],
+    status_only: bool = False,
+    expected_status: Optional[str] = None,
+) -> bool:
+    central = client.get_list_item(tracker_list_id, tracker_item_id)
+    fields = central.get("fields") or {}
+    updated = fields.get(field_names["updated"])
+    status = fields.get(field_names["summary"])
+    version = fields.get(field_names["version"])
+    confirmed_ingestion = fields.get(field_names["ingestion_date"])
+    if not status_only and (
+        not confirmed_ingestion
+        or datetime.fromisoformat(confirmed_ingestion.replace("Z", "+00:00"))
+        < datetime.fromisoformat(ingestion_date.replace("Z", "+00:00"))
+    ):
+        raise ValueError("Central tracker ingestion was not confirmed; refusing to mirror stale values")
+    if status not in INGESTION_STATUSES:
+        raise ValueError("Central RExI Status must be Success or Keep Trying")
+    if expected_status is not None and status != expected_status:
+        raise ValueError("Central tracker status update was not confirmed")
+    desired = {"RExISuccess": status}
+    if not status_only:
+        if not updated:
+            raise ValueError("Central tracker needs a successful updated date")
+        datetime.fromisoformat(updated.replace("Z", "+00:00"))
+        number = _version_number(version)
+        numeric_version = float(number)
+        if not numeric_version < float("inf") or Decimal(str(numeric_version)) != number:
+            raise ValueError("Central version cannot be represented exactly by the source numeric field")
+        desired.update(RExIUpdated=updated, RExIVersion=numeric_version)
+    library_item = source_item["listItem"]
+
+    def matches(actual):
+        if status_only:
+            return actual.get("RExISuccess") == status
+        return (
+            actual.get("RExISuccess") == status
+            and actual.get("RExIVersion") is not None
+            and _version_number(actual["RExIVersion"]) == number
+            and actual.get("RExIUpdated")
+            and datetime.fromisoformat(actual["RExIUpdated"].replace("Z", "+00:00"))
+            == datetime.fromisoformat(updated.replace("Z", "+00:00"))
+        )
+
+    if matches(library_item.get("fields") or {}):
+        return True
+    source_list_id = (source_item.get("sharepointIds") or {}).get("listId")
+    if not source_list_id:
+        source_list_id = client.get_drive_list(source["drive_id"])["id"]
+    client.update_list_item_fields(
+        source_list_id, library_item["id"], desired, if_match=library_item["eTag"],
+    )
+    confirmed = client.get_drive_item(source["drive_id"], source["item_id"])
+    confirmed_fields = (confirmed.get("listItem") or {}).get("fields") or {}
+    if not _is_item_approved(confirmed_fields, source.get("approval_field")):
+        raise ValueError(
+            "Source approval changed after metadata write-back; manual review required. "
+            "The pipeline will not publish or re-approve it."
+        )
+    if not matches(confirmed_fields):
+        raise ValueError("Source mirror values were not confirmed; will retry")
+    logger.info("Source library fields now mirror the central tracker")
+    return True
 
 
 def _resolve_tracker_field_names(
@@ -677,6 +781,7 @@ def _resolve_tracker_field_names(
         "version": "RExI Version",
         "summary": "Summary",
         "ingestion_date": "Ingestion Date",
+        "updated": "RExI Updated",
     }
 
     overrides = {}
@@ -694,6 +799,7 @@ def _resolve_tracker_field_names(
             "version": os.getenv(f"{prefix}VERSION", "").strip() or None,
             "summary": os.getenv(f"{prefix}SUMMARY", "").strip() or None,
             "ingestion_date": os.getenv(f"{prefix}INGESTION_DATE", "").strip() or None,
+            "updated": os.getenv(f"{prefix}UPDATED", "").strip() or None,
         }
 
     columns = list(client.get_list_columns(list_id))
@@ -716,6 +822,7 @@ def _resolve_tracker_field_names(
         "version": ["RExIVersion"],
         "summary": ["Summary"],
         "ingestion_date": ["IngestionDate"],
+        "updated": ["RExIUpdated"],
     }
 
     resolved = {}
@@ -762,20 +869,46 @@ def update_tracker_list(
     summary: Optional[str] = None,
     ingestion_date: Optional[str] = None,
     increment_version: bool = False,
+    source: Optional[dict] = None,
+    ingestion_succeeded: bool = True,
+    attempted_at: Optional[str] = None,
 ) -> bool:
     """
-    Add an entry to the SharePoint ingestion tracker list.
+    Update the authoritative tracker, then mirror its status onto a source file.
 
     Args:
         title: Title of the page/URL
         url: The URL that was ingested
         vector_id: The vector ID from RAG ingestion (optional)
         site_name: Optional site name (None for default site)
+        ingestion_succeeded: Success advances dates/version; failure changes only status.
+        attempted_at: Failed attempt timestamp, used to avoid overwriting newer success.
+        summary: Legacy payload field; replaced by the controlled outcome label.
 
     Returns:
-        True if successful, False otherwise
+        True only when the tracker and any requested source mirror are confirmed.
     """
+    if not sharepoint_writeback_enabled():
+        logger.info(
+            "SharePoint write-back disabled (SHAREPOINT_WRITEBACK_ENABLED=false); "
+            "skipping tracker-list update for '%s'",
+            title,
+        )
+        return False
     try:
+        use_rich_fields = not ingestion_succeeded or source is not None or any([
+            content_section, document_title, url, modified_by, document_modified,
+            document_modified_by, document_created, approver, summary is not None,
+            ingestion_date is not None, increment_version,
+        ])
+        # Older queued payloads may contain prose/error details in summary.
+        summary = STATUS_SUCCESS if ingestion_succeeded else STATUS_RETRY
+        if not ingestion_succeeded:
+            if not attempted_at:
+                raise ValueError("Retry-status updates require an attempt timestamp")
+            datetime.fromisoformat(attempted_at.replace("Z", "+00:00"))
+            ingestion_date = None
+            increment_version = False
         client = _get_sharepoint_client(site_name)
 
         # Site-specific or default tracker list ID/name
@@ -796,37 +929,39 @@ def update_tracker_list(
             tracker_list_id = client.get_list_by_name(tracker_list_name).get("id", "")
 
         if not tracker_list_id:
-            logger.debug("No tracker list configured, skipping")
+            logger.error("SharePoint write-back enabled but no tracker list configured")
             return False
 
-        action = "Ingested successfully"
-        if vector_id:
-            action = f"Ingested successfully (vector: {vector_id[:20]}...)"
-
-        use_rich_fields = any([
-            content_section,
-            document_title,
-            url,
-            modified_by,
-            document_modified,
-            document_modified_by,
-            document_created,
-            approver,
-            summary is not None,
-            ingestion_date is not None,
-            increment_version,
-        ])
         if not use_rich_fields:
-            client.add_list_item(
-                list_id=tracker_list_id,
-                title=title,
-                url=url,
-                action=action,
-            )
-            logger.info(f"Added tracker entry: {title}")
+            client.add_list_item(list_id=tracker_list_id, title=title, url=url, action=summary)
+            logger.info("Added tracker entry: %s", title)
             return True
 
         field_names = _resolve_tracker_field_names(client, tracker_list_id, site_name)
+        if not field_names.get("summary"):
+            raise ValueError("Central tracker is missing its RExI Status field")
+        if increment_version and ingestion_date and not field_names.get("ingestion_date"):
+            raise ValueError("Tracker needs an Ingestion Date column for retry-safe version updates")
+        source_item = None
+        if source is not None:
+            for required in ("updated", "summary", "version", "ingestion_date", "document_title"):
+                if not field_names.get(required):
+                    raise ValueError(f"Central tracker is missing the {required} field")
+            if ingestion_succeeded and (not ingestion_date or not increment_version):
+                raise ValueError("Source mirrors require a versioned ingestion with a date")
+            source_item = _prepare_source_mirror(client, source, status_only=not ingestion_succeeded)
+
+        def finish(item_id):
+            if source is None:
+                return True
+            if not item_id:
+                raise ValueError("Tracker write returned no item ID; cannot confirm source mirror")
+            return _mirror_tracker_entry(
+                client, tracker_list_id, item_id, field_names, source, source_item, ingestion_date,
+                status_only=not ingestion_succeeded,
+                expected_status=STATUS_RETRY if not ingestion_succeeded else None,
+            )
+
         fields_to_set: Dict[str, Any] = {}
         link_field_name = field_names.get("document_link")
 
@@ -871,6 +1006,8 @@ def update_tracker_list(
 
         if ingestion_date is not None and field_names.get("ingestion_date"):
             fields_to_set[field_names["ingestion_date"]] = ingestion_date
+        if ingestion_date is not None and field_names.get("updated"):
+            fields_to_set[field_names["updated"]] = ingestion_date
 
         existing_item = None
         if doc_title_raw and field_names.get("document_title"):
@@ -879,7 +1016,6 @@ def update_tracker_list(
             try:
                 items = list(client.get_list_items(
                     list_id=tracker_list_id,
-                    max_items=500,
                 ))
 
                 # Primary match: by source URL in the Document Link field (most stable identifier)
@@ -918,8 +1054,8 @@ def update_tracker_list(
                         if item_title and item_title == doc_title_norm:
                             matches.append(item)
             except Exception as e:
-                logger.warning(f"Tracker lookup failed, will create new entry: {e}")
-                matches = []
+                logger.error("Tracker lookup failed; refusing to create a possible duplicate: %s", e)
+                raise
 
             if matches:
                 def _item_sort_key(candidate: dict) -> str:
@@ -940,6 +1076,37 @@ def update_tracker_list(
 
         if existing_item:
             current_fields = existing_item.get("fields", {})
+            if source is not None and not existing_item.get("eTag"):
+                raise ValueError("Central tracker item is missing its ETag")
+            saved_ingestion_date = current_fields.get(field_names.get("ingestion_date"))
+            if not ingestion_succeeded:
+                if saved_ingestion_date and (
+                    datetime.fromisoformat(str(saved_ingestion_date).replace("Z", "+00:00"))
+                    >= datetime.fromisoformat(attempted_at.replace("Z", "+00:00"))
+                ):
+                    logger.info("Retry status superseded by a later successful ingestion")
+                    return True
+                if current_fields.get(field_names["summary"]) == STATUS_RETRY:
+                    return finish(existing_item["id"])
+                fields_to_set = {field_names["summary"]: STATUS_RETRY}
+            if ingestion_date and saved_ingestion_date:
+                saved_date = datetime.fromisoformat(str(saved_ingestion_date).replace("Z", "+00:00"))
+                requested_date = datetime.fromisoformat(ingestion_date.replace("Z", "+00:00"))
+                if saved_date >= requested_date:
+                    repairs = {}
+                    if saved_date == requested_date:
+                        if field_names.get("updated") and not current_fields.get(field_names["updated"]):
+                            repairs[field_names["updated"]] = ingestion_date
+                        if current_fields.get(field_names["summary"]) not in INGESTION_STATUSES:
+                            repairs[field_names["summary"]] = STATUS_SUCCESS
+                    if repairs:
+                        client.update_list_item_fields(
+                            tracker_list_id, existing_item["id"],
+                            repairs,
+                            if_match=existing_item.get("eTag"),
+                        )
+                    logger.info("Tracker already reflects this or a newer ingestion; copying central values")
+                    return finish(existing_item["id"])
             if increment_version and field_names.get("version"):
                 fields_to_set[field_names["version"]] = str(_increment_version(
                     current_fields.get(field_names["version"])
@@ -950,6 +1117,7 @@ def update_tracker_list(
                     list_id=tracker_list_id,
                     item_id=existing_item.get("id"),
                     fields=fields_to_set,
+                    if_match=existing_item.get("eTag"),
                 )
             except requests.exceptions.HTTPError as e:
                 if link_field_name and link_field_name in fields_to_set and e.response is not None and e.response.status_code == 400:
@@ -960,17 +1128,18 @@ def update_tracker_list(
                             list_id=tracker_list_id,
                             item_id=existing_item.get("id"),
                             fields=fields_to_set,
+                            if_match=existing_item.get("eTag"),
                         )
                 else:
                     raise
             logger.info(f"Updated tracker entry: {doc_title_value}")
-            return True
+            return finish(existing_item["id"])
 
         if increment_version and field_names.get("version"):
             fields_to_set[field_names["version"]] = "1"
 
         try:
-            client.add_list_item(
+            created = client.add_list_item(
                 list_id=tracker_list_id,
                 fields=fields_to_set,
             )
@@ -979,14 +1148,14 @@ def update_tracker_list(
                 logger.warning("Document Link update failed (400). Retrying without Document Link.")
                 fields_to_set = {key: value for key, value in fields_to_set.items() if key != link_field_name}
                 if fields_to_set:
-                    client.add_list_item(
+                    created = client.add_list_item(
                         list_id=tracker_list_id,
                         fields=fields_to_set,
                     )
             else:
                 raise
         logger.info(f"Added tracker entry: {doc_title_value}")
-        return True
+        return finish(created.get("id"))
 
     except Exception as e:
         logger.error(f"Failed to update tracker list: {e}")

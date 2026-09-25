@@ -6,9 +6,12 @@ metadata:
   labels:
     app: rag-pipeline
     site: rexi
+  annotations:
+    cluster-autoscaler.kubernetes.io/safe-to-evict: "false"
 spec:
   # Nightly at 09:00 UTC. Adjust as needed.
   schedule: "0 9 * * *"
+  timeZone: "Etc/UTC"
   # Never overlap runs (the pipeline also holds a DB-backed DistributedLock).
   concurrencyPolicy: Forbid
   startingDeadlineSeconds: 600
@@ -29,32 +32,37 @@ spec:
           restartPolicy: Never
           # Workload Identity → IAM DB auth + AI Hub egress (same SA as rexi-app).
           serviceAccountName: gke-rexi-sa
-          # Autopilot amd64 nodes (matches rexi-app toleration).
-          tolerations:
-            - effect: NoSchedule
-              key: kubernetes.io/arch
-              operator: Equal
-              value: amd64
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 65532
+            runAsGroup: 65532
+            fsGroup: 65532
+            seccompProfile:
+              type: RuntimeDefault
           containers:
             - name: ingest
               # Built + pushed by the rag_scrape_pipeline GitHub Action.
               # Canonical deploy copy lives in susom/rexi-deploy (Flux).
               image: us-west1-docker.pkg.dev/som-rit-infrastructure-prod/rexi-rag-pipeline/rag-pipeline:latest
               imagePullPolicy: Always
+              securityContext:
+                allowPrivilegeEscalation: false
+                readOnlyRootFilesystem: true
+                capabilities:
+                  drop: ["ALL"]
               command:
                 - python
                 - -m
                 - rag_pipeline.ingest_batch
                 - --site
                 - rexi
-                - --days-back
-                - "1"
               envFrom:
                 - configMapRef:
                     name: rag-pipeline-config
-                - secretRef:
-                    name: rag-pipeline-secrets
               volumeMounts:
+                - name: secrets-volume
+                  mountPath: /var/secrets
+                  readOnly: true
                 - name: cache
                   mountPath: /app/cache
                 - name: tmp
@@ -68,6 +76,12 @@ spec:
                   memory: 2Gi
                   ephemeral-storage: 2Gi
           volumes:
+            - name: secrets-volume
+              csi:
+                driver: secrets-store-gke.csi.k8s.io
+                readOnly: true
+                volumeAttributes:
+                  secretProviderClass: "secret-provider"
             - name: cache
               emptyDir: {}
             - name: tmp

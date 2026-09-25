@@ -17,6 +17,14 @@ CREATE TABLE IF NOT EXISTS rexi.ingestion_locks (
 CREATE INDEX IF NOT EXISTS ix_ingestion_locks_expires_at
     ON rexi.ingestion_locks (expires_at);
 
+-- Source checkpoints and durable tracker retries (migration 004 equivalent).
+-- Run before deploying the new image; create_all does not alter existing tables.
+ALTER TABLE rexi.document_ingestion_state
+    ADD COLUMN IF NOT EXISTS source_modified_at timestamptz,
+    ADD COLUMN IF NOT EXISTS source_attempt_modified_at timestamptz,
+    ADD COLUMN IF NOT EXISTS sharepoint_writeback_payload text,
+    ADD COLUMN IF NOT EXISTS sharepoint_writeback_error text;
+
 -- 2) Let the application role use the schema + tables + sequences.
 --    (rag_chunk and document_ingestion_state were already granted to rexi_app;
 --     these statements are idempotent and also cover the new lock table.)

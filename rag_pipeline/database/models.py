@@ -53,6 +53,14 @@ class DocumentIngestionState(Base):
     # Timestamps
     last_processed_at = Column(DateTime(), nullable=True, index=True)
     last_content_update_at = Column(DateTime(), nullable=True)
+    source_modified_at = Column(DateTime(), nullable=True)
+    # SharePoint revision from the last fully successful ingestion.
+    source_attempt_modified_at = Column(DateTime(), nullable=True)
+    # Revision being attempted, including failures (for per-revision retry limits).
+
+    sharepoint_writeback_payload = Column(Text, nullable=True)
+    # Durable pending tracker update; cleared only after confirmed delivery.
+    sharepoint_writeback_error = Column(Text, nullable=True)
 
     # Document metadata
     file_name = Column(String(512), nullable=True)
@@ -167,5 +175,4 @@ class User(Base):
 
     def __repr__(self):
         return f"<User(id={self.id}, username='{self.username}')>"
-
 

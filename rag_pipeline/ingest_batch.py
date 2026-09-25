@@ -8,7 +8,7 @@ session, acquire the distributed lock, run the orchestrator, print a JSON
 summary, exit with a status-appropriate code.
 
 Usage:
-    python -m rag_pipeline.ingest_batch [--site rexi] [--days-back 1]
+    python -m rag_pipeline.ingest_batch [--site rexi] [--days-back N]
                                         [--force-reprocess] [--dry-run]
                                         [--document-ids id1,id2]
 
@@ -45,8 +45,8 @@ def _parse_args(argv=None) -> argparse.Namespace:
     parser.add_argument(
         "--days-back",
         type=int,
-        default=1,
-        help="Only fetch SharePoint files modified in the last N days (default: 1). "
+        default=None,
+        help="Optionally limit discovery to the last N days (default: full scan). "
         "Ignored when --force-reprocess is set.",
     )
     parser.add_argument(
@@ -64,7 +64,10 @@ def _parse_args(argv=None) -> argparse.Namespace:
         default=None,
         help="Comma-separated list of specific document IDs to process.",
     )
-    return parser.parse_args(argv)
+    args = parser.parse_args(argv)
+    if args.days_back is not None and args.days_back <= 0:
+        parser.error("--days-back must be greater than zero")
+    return args
 
 
 def run(argv=None) -> int:
@@ -82,7 +85,7 @@ def run(argv=None) -> int:
 
     # SharePoint date filter (ignored on force-reprocess), matching the endpoint.
     modified_since = None
-    if not args.force_reprocess:
+    if not args.force_reprocess and args.days_back is not None:
         modified_since = datetime.now(timezone.utc) - timedelta(days=args.days_back)
         logger.info(
             f"SharePoint date filter: files modified since "

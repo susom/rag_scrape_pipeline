@@ -18,6 +18,7 @@ from rag_pipeline.processing.text_extraction import extract_text_from_file, get_
 from rag_pipeline.output_json import generate_run_id, write_canonical_json, RPP_VERSION
 from rag_pipeline.utils.logger import setup_logger
 from rag_pipeline.utils.urls import extract_urls_from_text
+from rag_pipeline.utils.env import sharepoint_writeback_enabled
 from rag_pipeline.processing.sliding_window import SlidingWindowParser
 from rag_pipeline.processing.ai_client import AVAILABLE_MODELS, DEFAULT_MODEL
 from rag_pipeline.scraping.scraper import scrape_url
@@ -1184,7 +1185,7 @@ def ingest_batch(
     force_reprocess: bool = False,
     document_ids: str = None,
     dry_run: bool = False,
-    days_back: int = 1,  # 24 hours
+    days_back: int | None = None,  # Full scan unless explicitly limited
     site: str = None,  # SharePoint site name (None for default)
     db: Session = Depends(get_db),
 ):
@@ -1202,6 +1203,7 @@ def ingest_batch(
         - force_reprocess: Ignore hash, reprocess all documents
         - document_ids: Comma-separated list of specific document IDs to process
         - dry_run: Report changes without actually ingesting
+        - days_back: Optional positive date window; omitted scans all eligible content
         - site: SharePoint site name (e.g., "som"). Omit for default site.
 
     Returns:
@@ -1241,7 +1243,9 @@ def ingest_batch(
 
     # Compute SharePoint date filter (ignored when force_reprocess=True)
     modified_since = None
-    if not force_reprocess:
+    if days_back is not None and days_back <= 0:
+        raise HTTPException(status_code=422, detail="days_back must be greater than zero")
+    if not force_reprocess and days_back is not None:
         modified_since = datetime.now(timezone.utc) - timedelta(days=days_back)
         logger.info(f"SharePoint date filter: files modified since {modified_since.isoformat()} ({days_back} days)")
 
@@ -1421,51 +1425,57 @@ def reset_ingestion(
         logger.error(f"MySQL cleanup error: {e}")
 
     # Step 3: Clear SharePoint tracker list
-    try:
-        site_config = get_site_config(site)
-        client = SharePointGraphClient(
-            site_hostname=site_config.hostname,
-            site_path=site_config.path,
-            tenant_id=site_config.tenant_id,
-            client_id=site_config.client_id,
-            client_secret=site_config.client_secret,
+    if not sharepoint_writeback_enabled():
+        logger.info(
+            "SharePoint write-back disabled (SHAREPOINT_WRITEBACK_ENABLED=false); "
+            "skipping tracker-list cleanup"
         )
+        results["tracker_cleanup_skipped"] = True
+    else:
+        try:
+            site_config = get_site_config(site)
+            client = SharePointGraphClient(
+                site_hostname=site_config.hostname,
+                site_path=site_config.path,
+                tenant_id=site_config.tenant_id,
+                client_id=site_config.client_id,
+                client_secret=site_config.client_secret,
+            )
 
-        # Resolve tracker list ID
-        tracker_list_id = ""
-        tracker_list_name = ""
-        if site and site != "default":
-            tracker_list_id = os.getenv(f"SHAREPOINT_SITE_{site.upper()}_TRACKER_LIST_ID", "").strip()
-            tracker_list_name = os.getenv(f"SHAREPOINT_SITE_{site.upper()}_TRACKER_LIST_NAME", "").strip()
-        else:
-            tracker_list_id = os.getenv("SHAREPOINT_TRACKER_LIST_ID", "").strip()
-            tracker_list_name = os.getenv("SHAREPOINT_TRACKER_LIST_NAME", "").strip()
+            tracker_list_id = ""
+            tracker_list_name = ""
+            if site and site != "default":
+                tracker_list_id = os.getenv(f"SHAREPOINT_SITE_{site.upper()}_TRACKER_LIST_ID", "").strip()
+                tracker_list_name = os.getenv(f"SHAREPOINT_SITE_{site.upper()}_TRACKER_LIST_NAME", "").strip()
+            else:
+                tracker_list_id = os.getenv("SHAREPOINT_TRACKER_LIST_ID", "").strip()
+                tracker_list_name = os.getenv("SHAREPOINT_TRACKER_LIST_NAME", "").strip()
 
-        if not tracker_list_id and tracker_list_name:
-            tracker_list_id = client.get_list_by_name(tracker_list_name).get("id", "")
+            if not tracker_list_id and tracker_list_name:
+                tracker_list_id = client.get_list_by_name(tracker_list_name).get("id", "")
 
-        if tracker_list_id:
-            site_id = client.get_site_id()
-            items = list(client.get_list_items(list_id=tracker_list_id, max_items=500))
-            logger.info(f"Found {len(items)} tracker list item(s) to delete")
+            if tracker_list_id:
+                site_id = client.get_site_id()
+                items = list(client.get_list_items(list_id=tracker_list_id))
+                logger.info(f"Found {len(items)} tracker list item(s) to delete")
 
-            for item in items:
-                item_id = item.get("id")
-                if not item_id:
-                    continue
-                try:
-                    client._make_request("DELETE", f"/sites/{site_id}/lists/{tracker_list_id}/items/{item_id}")
-                    results["tracker_items_deleted"] += 1
-                except Exception as e:
-                    results["tracker_items_failed"] += 1
-                    results["errors"].append(f"Tracker item delete failed ({item_id}): {e}")
-                    logger.warning(f"Failed to delete tracker item {item_id}: {e}")
-        else:
-            logger.info("No tracker list configured, skipping tracker cleanup")
+                for item in items:
+                    item_id = item.get("id")
+                    if not item_id:
+                        continue
+                    try:
+                        client._make_request("DELETE", f"/sites/{site_id}/lists/{tracker_list_id}/items/{item_id}")
+                        results["tracker_items_deleted"] += 1
+                    except Exception as e:
+                        results["tracker_items_failed"] += 1
+                        results["errors"].append(f"Tracker item delete failed ({item_id}): {e}")
+                        logger.warning(f"Failed to delete tracker item {item_id}: {e}")
+            else:
+                logger.info("No tracker list configured, skipping tracker cleanup")
 
-    except Exception as e:
-        results["errors"].append(f"Tracker list cleanup failed: {e}")
-        logger.error(f"Tracker list cleanup error: {e}")
+        except Exception as e:
+            results["errors"].append(f"Tracker list cleanup failed: {e}")
+            logger.error(f"Tracker list cleanup error: {e}")
 
     status = "completed" if not results["errors"] else "completed_with_errors"
     logger.info(f"Reset complete: {results}")
