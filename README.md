@@ -6,6 +6,15 @@ A modular pipeline for scraping, parsing, and processing content into RAG-ready 
 **Local:** `http://localhost:9090`
 **Source:** https://github.com/susom/rag_scrape_pipeline
 
+## Repository layout
+
+- `rag_pipeline/`: application, ingestion, source clients, and database migrations.
+- `config/`: shared source configuration and extraction prompts.
+- `tests/`: automated regression tests; `scripts/`: operator utilities.
+- `deploy/gke/`: RExI deployment reference and [deployment guide](deploy/gke/README.md).
+- `docs/`: supporting documentation; `docs/archive/redcap/`: historical REDCap integration references, not deployment instructions.
+- Local-only, ignored: `.env*`, `secrets/`, `venv/`, `cache/`, `logs/`, and `tiktoken_cache/`. Keep raw inputs and ingestion logs for debugging; never commit credentials or generated content.
+
 ## Features
 
 - **Web API** with HTML UI for interactive processing
@@ -253,6 +262,7 @@ Schema version: `rpp.v1`
 | `SHAREPOINT_SITE_CONTENT_EDITOR_FIELD` | No | Document library field that stores the last non-approver editor (default: `Last Editor (Draft)`) |
 | `SHAREPOINT_TRACKER_LIST_ID` | No | Tracker list ID for ingestion updates |
 | `SHAREPOINT_TRACKER_LIST_NAME` | No | Tracker list name (ID auto-resolved) |
+| `SHAREPOINT_WRITEBACK_ENABLED` | No | Default `false`: ingest independently without mutating SharePoint. Set `true` only in the designated writer (UAT now, prod later). Gates tracker updates/deletes and Graph mutations; invalid boolean values fail explicitly. |
 | `RAG_NAMESPACE_OVERRIDE` | No | Forces the namespace sent to the RAG EM API and stored in DB |
 | **Database (for automation)** | | |
 | `DB_USER` | For automation | Database username |
@@ -361,17 +371,21 @@ The pipeline fetches content from SharePoint and ingests it into the RAG vector 
 
 **Automated Workflow (`POST /api/ingest-batch`):**
 1. Acquire distributed lock (prevents concurrent runs)
-2. Fetch site pages or document libraries (respecting `modified_since` date filter) + external URLs from SharePoint
+2. Enumerate all eligible site pages or approved document-library files + configured external URLs
 3. External URLs source is always fetched when configured - URLs inside are extracted every run
 4. Delta detection:
-   - SharePoint files: `lastModifiedDateTime` from Graph API vs `last_processed_at` in DB
+   - SharePoint pages/files: `lastModifiedDateTime` from Graph API vs the successful `source_modified_at` checkpoint in this environment's DB
+   - For files with changed timestamps, compare extracted source text (before AI) with `content_hash`. Metadata-only changes advance the checked revision without re-extracting via AI, re-embedding, or incrementing the RExI version.
    - External URLs: SHA-256 hash of scraped content vs `content_hash` in DB
 5. Process changed documents through AI pipeline
-6. Ingest sections into RAG vector database (Pinecone via REDCap EM API)
+6. Ingest sections into the configured RAG vector database (Pinecone or pgvector)
 7. Clean up stale vectors on re-ingestion
+8. Persist a pending tracker/mirror update for successful, partial, or failed ingestion (including empty/download/extraction failures). Only the environment with `SHAREPOINT_WRITEBACK_ENABLED=true` delivers it to SharePoint. Failed delivery retries independently of AI extraction or embedding.
 
 **Date Filtering:**
-- SharePoint pages/files respect `modified_since` parameter (e.g., 7 days for weekly cron)
+- CLI and API default to a full metadata scan, so new environments and missed cron runs do not lose older approved content. Only new/changed or retryable failed documents are processed.
+- `--days-back N` (CLI) / `days_back=N` (API) explicitly limits discovery to a positive number of days. This can omit older unprocessed documents; routine RExI cron runs should omit it.
+- `--force-reprocess` / `force_reprocess=true` bypasses the date window and local dedup/retry limits, but not approval gating or the SharePoint write-back flag.
 - External URLs source is **always fetched** when configured (bypasses date filter)
 - Client-side filtering (reliable, avoids Graph API OData filter syntax issues)
 
@@ -385,17 +399,33 @@ The pipeline fetches content from SharePoint and ingests it into the RAG vector 
 - `SHAREPOINT_SITE_{NAME}_TRACKER_LIST_NAME`: Optional list display name (ID auto-resolved)
 - `SHAREPOINT_SITE_{NAME}_TRACKER_FIELD_CONTENT_SECTION` / `DOCUMENT_TITLE` / `VERSION` / `SUMMARY`: Optional tracker field name overrides
 
-**Database Tracking (Cloud SQL / MySQL):**
+**Environment Separation and Write-back:**
+- Dev, UAT, and prod use their own tracking DB and vector store; they independently read the same nine RExI content libraries. No cross-environment data synchronization is required.
+- Dev/local: write-back `false`. UAT: `true` until prod becomes the designated writer; then UAT switches to `false` and prod to `true`.
+- The central Content Status List is authoritative for ingestion reporting. It records `IngestionDate`, `RExIUpdated`, `Summary` (displayed as RExI Status), `RExIVersion`, and source metadata.
+- After the central write, the pipeline reads its saved values and mirrors the exact `RExIUpdated`, status, and version into the source document-library item's `RExIUpdated`, `RExISuccess`, and numeric `RExIVersion` fields. The content-section pages display those library items; page contents are not edited. Versions increment only centrally, not independently on each copy.
+- SharePoint status text is exactly **Success** or **Keep Trying**. Success advances the successful dates/version. A partial or failed ingestion changes only status to Keep Trying in both places, preserving all previous successful dates/versions. A first-ever failure creates a central entry without success dates/version. Error details and retry-limit states remain internal; Keep Trying does not remove the existing retry limit.
+- Source approval remains independent of ingestion status. The pipeline never deliberately changes approval or auto-publishes documents, and it does not use shared tracker status to exclude documents from another environment.
+- Pending tracker payloads are retained even when write-back is disabled. Enabling the flag delivers that environment's backlog. Never enable it in dev.
+- Delivery retries reuse the saved ingestion date; a matching or newer central entry is not version-incremented again. A failed mirror leaves the payload pending, so the next attempt copies the central values rather than creating another ingestion/version. Pending state is cleared only when both destinations are confirmed.
+- File content is verified before success delivery and source updates use `If-Match` with the list-item ETag. Status-only failures do not require downloading/parsing the failed file. A queued failure cannot overwrite a newer central success. Concurrent edits, missing required columns, invalid versions, and unrecognized central status text are explicit delivery errors, not silently truncated/faked successes. Legacy queued success descriptions are normalized to Success.
+- Metadata updates can affect SharePoint's Modified timestamp. Extracted-text hashes prevent metadata-only re-ingestion in every environment, including dev. Source approval is checked again after mirroring: if a library's moderation settings demote the item, delivery remains pending and logs an error requiring manual review; the pipeline does not re-approve it.
+- Older tracker-only pending payloads (including the initial 49-document local ingest) are upgraded lazily by a flagged run using the full source inventory. Identity and the pre-AI text hash are saved before any SharePoint write. An unchanged source revision is required; changed/missing sources must be re-ingested/resolved instead of being marked successful with stale data. No additional DB columns beyond migration 004 are required.
+- The flag is an explicit permission, not automatic environment detection. Configure it separately in each deployment.
+
+**Database Tracking (Postgres / MySQL):**
 - `document_ingestion_state` table: content hash, vector IDs, ingestion status, retry counts
 - `ingestion_locks` table: distributed locking across Cloud Run instances
 - Migrations in `rag_pipeline/database/migrations/`
+- Before deploying this version to an existing tracking DB, run `python -m rag_pipeline.database.migrations.004_add_ingestion_checkpoints` with that environment's DB configuration. For GKE Postgres, `deploy/gke/db_readiness.sql` includes the equivalent schema additions. `create_all` does not migrate existing tables.
+- Existing rows with no source checkpoint are re-ingested to establish a trustworthy revision (or verified by a matching source-text hash). Successful ingestion timestamps advance only after all sections succeed; `source_modified_at` may also advance after proving a metadata-only edit left source text unchanged. Failed revisions retry up to `INGESTION_MAX_RETRIES`; changed revisions or force-reprocess can be attempted again.
 
 **Benefits:**
 - Only changed documents are re-processed (hash-based delta detection)
 - Full vector cleanup on re-ingestion (no orphaned vectors)
 - Failure-safe: partial failures keep old vectors intact
 - Distributed locking prevents duplicate processing
-- Efficient: Date filtering reduces API calls and processing time
+- Efficient: metadata scans avoid downloading/embedding unchanged successfully ingested documents
 
 ---
 

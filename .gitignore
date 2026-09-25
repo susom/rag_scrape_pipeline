@@ -51,6 +51,7 @@ nosetests.xml
 coverage.xml
 *.cover
 .pytest_cache/
+.ruff_cache/
 
 # Node (if frontend creeps in later)
 node_modules/
@@ -80,3 +81,5 @@ CAPPY.md
 .cappyignore
 
 secrets/*
+.claude/
+tiktoken_cache/

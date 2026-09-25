@@ -1,5 +1,7 @@
 <?php
 /**
+ * Historical integration reference only; not part of the pipeline runtime.
+ *
  * ADD THESE CASES to redcap_rag_v9.9.9/RedcapRAG.php
  * in the redcap_module_api() function's switch statement
  * (around line 1362, after the storeDocument case)

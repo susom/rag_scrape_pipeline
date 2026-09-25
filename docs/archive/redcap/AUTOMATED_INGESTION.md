@@ -1,5 +1,9 @@
 # Automated RAG Ingestion Workflow
 
+> Historical stub-era implementation notes. For current behavior, see the
+> [main README](../../../README.md); for RExI deployment, see the
+> [GKE guide](../../../deploy/gke/README.md).
+
 ## Overview
 
 This document describes the automated RAG ingestion system that was implemented based on the plan in the session transcript.

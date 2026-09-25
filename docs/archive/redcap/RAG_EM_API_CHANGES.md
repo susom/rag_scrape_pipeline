@@ -1,5 +1,8 @@
 # RAG EM API Changes Needed
 
+> Historical REDCap integration handoff, not current deployment instructions.
+> The companion PHP snippet is reference material, not executable pipeline code.
+
 ## Summary
 
 Your RAG EM already has all the functions needed! You just need to expose them via the API.
