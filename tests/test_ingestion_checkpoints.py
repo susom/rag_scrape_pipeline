@@ -173,6 +173,25 @@ def test_cli_passes_expected_window(monkeypatch, args, has_window):
     assert (run.call_args.kwargs["modified_since"] is not None) is has_window
 
 
+@pytest.mark.parametrize("status,failed,errors,exit_code", [
+    ("completed", 0, [], 0),
+    ("failed", 0, [], 1),
+    ("completed", 1, [], 1),
+    ("completed", 0, [{"type": "content_fetch_error", "message": "unavailable"}], 1),
+    ("completed", 0, [{"type": "sharepoint_writeback_error", "message": "unavailable"}], 1),
+])
+def test_cli_reports_batch_errors_to_cron(monkeypatch, status, failed, errors, exit_code):
+    from rag_pipeline import ingest_batch
+
+    monkeypatch.setattr(ingest_batch, "load_secret_file", lambda: [])
+    monkeypatch.setattr(ingest_batch, "init_db", lambda: None)
+    monkeypatch.setattr(ingest_batch, "SessionLocal", Mock())
+    monkeypatch.setattr(ingest_batch, "DistributedLock", MagicMock())
+    result = orchestration.IngestionResult(status, "run", 0, 0, 0, failed, 0, errors, False)
+    monkeypatch.setattr(ingest_batch, "run_automated_ingestion", Mock(return_value=result))
+    assert ingest_batch.run(["--site", "rexi"]) == exit_code
+
+
 @pytest.mark.parametrize("days_back,force,has_window", [
     (None, False, False), (7, False, True), (7, True, False),
 ])
@@ -733,6 +752,8 @@ def test_dev_manifest_covers_nine_sections_and_full_scan():
     assert "b!BXWUfoFePki1FTOIM50Tb7Ru3GLtKONNoLeFVKHt_P1PDV489Zk2TKbjavhRM5mY" in drives
     assert "b!BXWUfoFePki1FTOIM50Tb7Ru3GLtKONNoLeFVKHt_P2fVAhhAKAtR4UzROJQMnrU" in drives
     assert '  SHAREPOINT_WRITEBACK_ENABLED: "false"' in config
+    assert '  RAG_NAMESPACE_OVERRIDE: "rexi_knowledge"' in config
+    assert '  PGVECTOR_TABLE: "rag_chunk"' in config
     cron = (root / "deploy/gke/cronjob.yaml").read_text()
     assert '  schedule: "0 9 * * *"' in cron
     assert '  timeZone: "Etc/UTC"' in cron
@@ -741,3 +762,14 @@ def test_dev_manifest_covers_nine_sections_and_full_scan():
     assert "mountPath: /var/secrets" in cron
     assert "readOnlyRootFilesystem: true" in cron
     assert "secretRef:" not in cron
+
+
+def test_redcap_production_is_not_triggered_by_rexi_release():
+    root = Path(__file__).resolve().parents[1]
+    production = (root / ".github/workflows/rag_scrape_pipeline_prod.yaml").read_text()
+    assert "  workflow_dispatch:" in production
+    assert "  push:" not in production
+    assert "if: github.ref == 'refs/heads/main'" in production
+    publishing = (root / ".github/workflows/push_docker.yaml").read_text()
+    assert "  push:" in publishing
+    assert "      - main" in publishing

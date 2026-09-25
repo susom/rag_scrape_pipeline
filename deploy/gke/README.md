@@ -22,6 +22,9 @@ The nightly schedule is explicitly 09:00 UTC. Do not add `--days-back 1` to the
 routine job: a 24-hour cutoff misses older approved content in a new environment
 or after an outage.
 
+The batch exits nonzero on fatal, per-document, discovery, or write-back errors,
+so Kubernetes does not mark a partially failed run successful.
+
 ### Environment-specific configuration
 
 This reference manifest targets **dev**, not UAT. Keep
@@ -34,6 +37,11 @@ Only UAT should set `SHAREPOINT_WRITEBACK_ENABLED=true` for now. When prod takes
 over, disable UAT's flag before enabling prod's. The flag gates writes, not
 ingestion: all environments maintain their own RAG data. Enabling it also
 delivers any pending tracker updates saved while it was disabled.
+
+Start every new environment with write-back disabled and the CronJob suspended.
+Verify the database identity/schema/grants, source discovery, ingestion, repeat
+deduplication, and chatbot retrieval before resuming the schedule or enabling a
+designated writer. Do not infer readiness from a completed image rollout alone.
 
 Write-back first updates the central Content Status List, then copies its date,
 status, and version to the source library's `RExIUpdated`, `RExISuccess`, and
@@ -101,6 +109,9 @@ tagged `latest`, `build-<run#>`, `sha-<sha>`. The `rexi-cluster` node SA already
 pulls from this registry (same project as `rexi-app`'s image). Nothing to do
 here beyond merging to `main`.
 
+REDCap production uses a separate, manually dispatched workflow. A push to
+`main` publishes the RExI image without redeploying REDCap Cloud Run.
+
 ### 3. Preserve the existing CSI secret mount
 Dev already uses the `secret-provider` SecretProviderClass, shared with the
 RExI app. Preserve its read-only mount at `/var/secrets`; do not create a second
@@ -125,6 +136,32 @@ pod security settings. No secret values belong in Git.
 These local manifests are reference files, not the live deployment source.
 The live Flux manifest may pin an older image; a pipeline commit alone does not
 prove that the cluster has received it. Verify the reconciled image and config.
+
+### UAT and prod promotion
+
+Build once and promote the verified immutable `build-N` tag, not a fresh image
+per environment. Dev follows the Flux image policy automatically; UAT/prod
+should pin their approved tag. The dev and UAT manifests live under their
+respective project directories in `susom/rexi-deploy`. When prod is provisioned,
+add its environment directory to that repository using the same CronJob/CSI
+pattern and its actual database IAM identity and infrastructure settings.
+
+Use `RAG_NAMESPACE_OVERRIDE=rexi_knowledge`, `PGVECTOR_NAMESPACE=rexi_knowledge`,
+and `PGVECTOR_TABLE=rag_chunk` in each environment, but never share their
+database instances. Confirm that each environment's `rexi.db.internal` resolves
+to its own database. Apply RExI's managed schema (including `ingestion_locks`)
+and the runtime grants before the first batch.
+
+Use explicit UTC schedules: dev `0 9 * * *`, UAT `15 9 * * *`, and prod
+`30 9 * * *` when activated. Keep future environments suspended until their
+smoke checks pass. Promote the image/config while suspended; only then commit
+`suspend: false`. Keep all write-back flags false initially; the separate
+single-document writer validation gates enabling UAT, and later prod.
+
+The chatbot's `ai.embedding.url` must point to
+`text-embedding-3-small/embeddings`, not a chat-completions endpoint. This is
+separate from the pipeline's `AI_HUB_EMBEDDING_URL` and must be correct in every
+environment for ingested content to be retrievable.
 
 ## First run — dry run before real ingest
 

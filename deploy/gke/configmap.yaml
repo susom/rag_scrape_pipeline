@@ -18,6 +18,7 @@ data:
   RAG_BACKEND: "pgvector"
   PGVECTOR_NAMESPACE: "rexi_knowledge"
   PGVECTOR_TABLE: "rag_chunk"
+  RAG_NAMESPACE_OVERRIDE: "rexi_knowledge"
 
   # ---- Tracking DB: Cloud SQL Postgres (rexi_db) via private DNS + IAM auth ----
   DB_ENGINE: "postgresql"
@@ -29,6 +30,8 @@ data:
   DB_SCHEMA: "rexi"
   # Pod has CRUD only (no DDL) — skip create_all, tables are pre-created.
   DB_SKIP_INIT_DDL: "true"
+  HOME: "/tmp"
+  PYTHONDONTWRITEBYTECODE: "1"
 
   # ---- SharePoint source: RExI site, named workflow document libraries ----
   # Approval gating (_ApprovalStatus / _ModerationStatus) is auto-detected per

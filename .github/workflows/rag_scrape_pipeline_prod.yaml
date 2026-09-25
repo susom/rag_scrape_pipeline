@@ -1,12 +1,11 @@
-name: CI Build and Deploy
+name: Deploy REDCap production (manual)
 
 on:
-  push:
-    branches:
-      - main
+  workflow_dispatch:
 
 jobs:
   build-deploy:
+    if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     environment: production
     env:

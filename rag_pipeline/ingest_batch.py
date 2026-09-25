@@ -129,7 +129,7 @@ def run(argv=None) -> int:
             "dry_run": result.dry_run,
         }
         print(json.dumps(summary, default=str))
-        return 1 if result.status == "failed" else 0
+        return 1 if result.status == "failed" or result.documents_failed or result.errors else 0
 
     except LockAlreadyHeld as e:
         logger.warning(f"Ingestion already in progress: {e}")

@@ -273,7 +273,18 @@ Schema version: `rpp.v1`
 
 ---
 
-## Production Deployment (Cloud Run)
+## Releases
+
+Pushing `main` builds the RExI pipeline image. Dev Flux automatically picks up
+new `build-N` tags; UAT/prod should promote the same verified tag through their
+environment manifests. See [the GKE deployment guide](deploy/gke/README.md).
+
+REDCap production deployment is separate: run **Deploy REDCap production
+(manual)** from GitHub Actions on `main` when a REDCap release is intended.
+RExI pushes no longer deploy REDCap Cloud Run. The existing `development`
+branch workflow for REDCap development is unchanged.
+
+## REDCap Production Deployment (Cloud Run)
 
 **⚠️ CRITICAL:** When deploying to Cloud Run, increase the request timeout from the default 5 minutes to 60 minutes to support link-following operations.
 
