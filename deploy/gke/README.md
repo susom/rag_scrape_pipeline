@@ -33,7 +33,8 @@ This reference manifest targets **dev**, not UAT. Keep
 destination (`PGVECTOR_TABLE` / `PGVECTOR_NAMESPACE`). Reuse the same nine source
 drive IDs and tracker list, not the same ingestion-state database.
 
-Only UAT should set `SHAREPOINT_WRITEBACK_ENABLED=true` for now. When prod takes
+UAT is the designated writer. Enable its flag only on an image that includes the
+central-only default described below. When prod takes
 over, disable UAT's flag before enabling prod's. The flag gates writes, not
 ingestion: all environments maintain their own RAG data. Enabling it also
 delivers any pending tracker updates saved while it was disabled.
@@ -62,6 +63,15 @@ Before enabling UAT broadly, verify a single file's central/mirrored values and
 approval state. A metadata write that changes approval is reported as an error
 and is never followed by automatic publishing/re-approval.
 
+**Source-file mirroring is off by default.** The 2026-10-02 single-document UAT
+test wrote the central tracker and the `RExI*` mirror columns, and the RExI
+libraries' Approvals feature then reset the file's `_ApprovalStatus` from 3
+(Approved) to 0. Any metadata write to an approved file creates a new,
+unapproved version. Write-back therefore updates only the central Content
+Status List unless `SHAREPOINT_WRITEBACK_MIRROR_ENABLED=true`. Do not set that
+flag while the libraries use Approvals: every mirrored file would leave the
+approved set and stop being ingested.
+
 Toggles (all in `configmap.yaml`): `AI_BACKEND=aihub`, `RAG_BACKEND=pgvector`,
 `DB_ENGINE=postgresql` + `DB_IAM_AUTH=true` + `DB_SKIP_INIT_DDL=true`. With these
 unset the same image behaves as the SOM/REDCap default (SecureChatAI + Pinecone +
@@ -71,14 +81,21 @@ MySQL), so nothing here affects the live SOM leg.
 
 | File | Purpose |
 |------|---------|
-| `db_readiness.sql` | Run once in Cloud SQL Studio as `rexi_owner` (creates `ingestion_locks`, grants). |
+| `db_readiness.sql` | Fallback only, for a database RExI's Liquibase has not migrated (creates `ingestion_locks`, checkpoint columns, grants). |
 | `configmap.yaml` | Non-secret env (AI Hub URLs, DB host, SharePoint site + library drive IDs, tracker list). |
 | `secret.example.yaml` | Optional plain-Secret example for standalone installations without CSI; not used by dev. |
 | `cronjob.yaml` | The CronJob (schedule, SA, command, env wiring). |
 
 ## One-time prerequisites
 
-### 1. DB readiness (you, in Cloud SQL Studio as `rexi_owner`)
+### 1. DB readiness (normally automatic)
+The RExI backend runs Liquibase as `rexi_owner` on startup, and its
+`baseline.sql` (`susom/rexi`) creates `rag_chunk`, `document_ingestion_state`
+(with the checkpoint/write-back columns) and `ingestion_locks`. The pipeline
+uses the same IAM DB user as `rexi-app`, so no extra grants are needed. Verify
+the tables exist before the first batch; UAT was provisioned this way.
+
+Use the manual SQL below only for a database RExI has not migrated.
 Paste the contents of [`db_readiness.sql`](./db_readiness.sql). It creates
 `rexi.ingestion_locks` and grants schema/table/sequence privileges directly to
 the pod's IAM DB user (`gke-rexi-sa@som-rit-phi-rexi-dev.iam`). The other two
@@ -162,6 +179,14 @@ The chatbot's `ai.embedding.url` must point to
 `text-embedding-3-small/embeddings`, not a chat-completions endpoint. This is
 separate from the pipeline's `AI_HUB_EMBEDDING_URL` and must be correct in every
 environment for ingested content to be retrievable.
+
+Also set `ai.gemini.project` in each environment's `rexi-app.yaml`. RExI's
+`GeminiClient` falls back to `som-rit-phi-rexi-dev`, so an unset value makes
+non-dev chatbots fail with a 403 on `aiplatform.endpoints.predict`.
+
+Each environment's Cloud NAT egress IP must be allowlisted by SHC for
+`aihubapi.stanfordhealthcare.org:443`, or AI calls time out at connect
+(dev `34.158.242.16`, UAT `34.145.79.230`). GKE FQDN policies already allow it.
 
 ## First run — dry run before real ingest
 

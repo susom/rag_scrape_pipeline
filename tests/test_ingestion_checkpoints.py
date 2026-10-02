@@ -14,7 +14,7 @@ from rag_pipeline.automation import orchestrator as orchestration
 from rag_pipeline.database.models import DocumentIngestionState
 from rag_pipeline.ingest_batch import _parse_args
 from rag_pipeline.sharepoint.graph_client import SharePointGraphClient
-from rag_pipeline.utils.env import sharepoint_writeback_enabled
+from rag_pipeline.utils.env import sharepoint_writeback_enabled, sharepoint_writeback_mirror_enabled
 
 
 REVISION = datetime(2026, 9, 1, tzinfo=timezone.utc)
@@ -381,6 +381,48 @@ def test_no_new_documents_still_retries_writeback(worker, db, monkeypatch):
     tracker.assert_called_once()
 
 
+def test_mirror_flag_defaults_off(monkeypatch):
+    monkeypatch.delenv("SHAREPOINT_WRITEBACK_MIRROR_ENABLED", raising=False)
+    assert sharepoint_writeback_mirror_enabled() is False
+    monkeypatch.setenv("SHAREPOINT_WRITEBACK_MIRROR_ENABLED", "true")
+    assert sharepoint_writeback_mirror_enabled() is True
+
+
+@pytest.mark.parametrize("mirror", ["false", "true"])
+def test_writeback_mirror_gate(worker, db, monkeypatch, mirror):
+    source = {"drive_id": "drive", "item_id": "file", "content_hash": "abc", "approval_field": None}
+    payload = {"title": "source", "url": URI, "site_name": "rexi", "increment_version": True,
+               "ingestion_date": "2026-09-01T01:00:00Z", "source": source}
+    add_record(db, sharepoint_writeback_payload=json.dumps(payload))
+    monkeypatch.setenv("SHAREPOINT_WRITEBACK_ENABLED", "true")
+    monkeypatch.setenv("SHAREPOINT_WRITEBACK_MIRROR_ENABLED", mirror)
+    tracker = Mock(return_value=True)
+    monkeypatch.setattr(orchestration, "update_tracker_list", tracker)
+    worker._flush_sharepoint_writebacks()
+    sent = tracker.call_args.kwargs
+    if mirror == "true":
+        assert sent["source"] == source
+    else:
+        assert "source" not in sent
+        assert sent["increment_version"] is True
+    assert db.query(DocumentIngestionState).one().sharepoint_writeback_payload is None
+
+
+def test_central_only_skips_legacy_source_upgrade(worker, db, monkeypatch):
+    payload = {"title": "source", "url": URI, "site_name": "rexi", "increment_version": True,
+               "ingestion_date": "2026-09-01T01:00:00Z"}
+    add_record(db, sharepoint_writeback_payload=json.dumps(payload))
+    monkeypatch.setenv("SHAREPOINT_WRITEBACK_ENABLED", "true")
+    monkeypatch.delenv("SHAREPOINT_WRITEBACK_MIRROR_ENABLED", raising=False)
+    monkeypatch.setattr(worker, "_upgrade_pending_source",
+                        Mock(side_effect=AssertionError("must not touch the source file")))
+    tracker = Mock(return_value=True)
+    monkeypatch.setattr(orchestration, "update_tracker_list", tracker)
+    worker._flush_sharepoint_writebacks()
+    tracker.assert_called_once()
+    assert "source" not in tracker.call_args.kwargs
+
+
 def tracker_client(monkeypatch, ingestion_date="2026-09-01T01:00:00Z"):
     monkeypatch.setenv("SHAREPOINT_WRITEBACK_ENABLED", "true")
     monkeypatch.setenv("SHAREPOINT_TRACKER_LIST_ID", "tracker")
@@ -706,6 +748,7 @@ def test_legacy_pending_payload_upgrade_is_safe_and_durable(worker, db, monkeypa
     client.download_file_content.return_value = b"original source text before AI"
     monkeypatch.setattr(worker, "_get_sp_client", lambda: client)
     monkeypatch.setenv("SHAREPOINT_WRITEBACK_ENABLED", "true")
+    monkeypatch.setenv("SHAREPOINT_WRITEBACK_MIRROR_ENABLED", "true")
     tracker = Mock(return_value=False)
     monkeypatch.setattr(orchestration, "update_tracker_list", tracker)
     worker._flush_sharepoint_writebacks()

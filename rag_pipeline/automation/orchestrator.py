@@ -36,7 +36,7 @@ from rag_pipeline.main import run_pipeline
 from rag_pipeline.output_json import write_canonical_json
 from rag_pipeline.scraping.scraper import scrape_url
 from rag_pipeline.utils.logger import setup_logger
-from rag_pipeline.utils.env import sharepoint_writeback_enabled
+from rag_pipeline.utils.env import sharepoint_writeback_enabled, sharepoint_writeback_mirror_enabled
 
 # RAG_BACKEND=pgvector → push to pgvector postgres via RExI /rag/ingest endpoint
 # RAG_BACKEND=pinecone (default) → push to Pinecone via REDCap EM API
@@ -1319,11 +1319,15 @@ class IngestionOrchestrator:
         )
         if document_ids:
             query = query.filter(DocumentIngestionState.document_id.in_(document_ids))
+        mirror_enabled = sharepoint_writeback_mirror_enabled()
         for record in query.all():
             document_id = record.document_id
             try:
                 payload = json.loads(record.sharepoint_writeback_payload)
-                if payload.get("increment_version") and "source" not in payload:
+                if not mirror_enabled:
+                    # Central tracker only: a source-file metadata write resets approval.
+                    payload.pop("source", None)
+                elif payload.get("increment_version") and "source" not in payload:
                     payload = self._upgrade_pending_source(record, payload)
                 if not update_tracker_list(**payload):
                     raise RuntimeError("SharePoint tracker/mirror update was not confirmed; will retry")
