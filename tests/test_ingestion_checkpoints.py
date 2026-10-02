@@ -388,8 +388,8 @@ def test_mirror_flag_defaults_off(monkeypatch):
     assert sharepoint_writeback_mirror_enabled() is True
 
 
-@pytest.mark.parametrize("mirror", ["false", "true"])
-def test_writeback_mirror_gate(worker, db, monkeypatch, mirror):
+@pytest.mark.parametrize("mirror,expected", [("false", False), ("true", True)])
+def test_flush_passes_mirror_flag_and_keeps_source(worker, db, monkeypatch, mirror, expected):
     source = {"drive_id": "drive", "item_id": "file", "content_hash": "abc", "approval_field": None}
     payload = {"title": "source", "url": URI, "site_name": "rexi", "increment_version": True,
                "ingestion_date": "2026-09-01T01:00:00Z", "source": source}
@@ -400,11 +400,8 @@ def test_writeback_mirror_gate(worker, db, monkeypatch, mirror):
     monkeypatch.setattr(orchestration, "update_tracker_list", tracker)
     worker._flush_sharepoint_writebacks()
     sent = tracker.call_args.kwargs
-    if mirror == "true":
-        assert sent["source"] == source
-    else:
-        assert "source" not in sent
-        assert sent["increment_version"] is True
+    assert sent["mirror_source"] is expected
+    assert sent["source"] == source  # still verified read-only when not mirrored
     assert db.query(DocumentIngestionState).one().sharepoint_writeback_payload is None
 
 
@@ -414,13 +411,13 @@ def test_central_only_skips_legacy_source_upgrade(worker, db, monkeypatch):
     add_record(db, sharepoint_writeback_payload=json.dumps(payload))
     monkeypatch.setenv("SHAREPOINT_WRITEBACK_ENABLED", "true")
     monkeypatch.delenv("SHAREPOINT_WRITEBACK_MIRROR_ENABLED", raising=False)
-    monkeypatch.setattr(worker, "_upgrade_pending_source",
-                        Mock(side_effect=AssertionError("must not touch the source file")))
+    upgrade = Mock()
+    monkeypatch.setattr(worker, "_upgrade_pending_source", upgrade)
     tracker = Mock(return_value=True)
     monkeypatch.setattr(orchestration, "update_tracker_list", tracker)
     worker._flush_sharepoint_writebacks()
+    upgrade.assert_not_called()
     tracker.assert_called_once()
-    assert "source" not in tracker.call_args.kwargs
 
 
 def tracker_client(monkeypatch, ingestion_date="2026-09-01T01:00:00Z"):

@@ -263,6 +263,7 @@ Schema version: `rpp.v1`
 | `SHAREPOINT_TRACKER_LIST_ID` | No | Tracker list ID for ingestion updates |
 | `SHAREPOINT_TRACKER_LIST_NAME` | No | Tracker list name (ID auto-resolved) |
 | `SHAREPOINT_WRITEBACK_ENABLED` | No | Default `false`: ingest independently without mutating SharePoint. Set `true` only in the designated writer (UAT now, prod later). Gates tracker updates/deletes and Graph mutations; invalid boolean values fail explicitly. |
+| `SHAREPOINT_WRITEBACK_MIRROR_ENABLED` | No | Default `false`: write-back updates only the central Content Status List. `true` also copies status onto each source file's `RExI*` columns, which resets the file's approval under SharePoint Approvals. Leave `false` for the RExI libraries. |
 | `RAG_NAMESPACE_OVERRIDE` | No | Forces the namespace sent to the RAG EM API and stored in DB |
 | **Database (for automation)** | | |
 | `DB_USER` | For automation | Database username |
@@ -391,7 +392,7 @@ The pipeline fetches content from SharePoint and ingests it into the RAG vector 
 5. Process changed documents through AI pipeline
 6. Ingest sections into the configured RAG vector database (Pinecone or pgvector)
 7. Clean up stale vectors on re-ingestion
-8. Persist a pending tracker/mirror update for successful, partial, or failed ingestion (including empty/download/extraction failures). Only the environment with `SHAREPOINT_WRITEBACK_ENABLED=true` delivers it to SharePoint. Failed delivery retries independently of AI extraction or embedding.
+8. Persist a pending tracker update for successful, partial, or failed ingestion (including empty/download/extraction failures). Only the environment with `SHAREPOINT_WRITEBACK_ENABLED=true` delivers it to SharePoint. Failed delivery retries independently of AI extraction or embedding.
 
 **Date Filtering:**
 - CLI and API default to a full metadata scan, so new environments and missed cron runs do not lose older approved content. Only new/changed or retryable failed documents are processed.
@@ -414,14 +415,15 @@ The pipeline fetches content from SharePoint and ingests it into the RAG vector 
 - Dev, UAT, and prod use their own tracking DB and vector store; they independently read the same nine RExI content libraries. No cross-environment data synchronization is required.
 - Dev/local: write-back `false`. UAT: `true` until prod becomes the designated writer; then UAT switches to `false` and prod to `true`.
 - The central Content Status List is authoritative for ingestion reporting. It records `IngestionDate`, `RExIUpdated`, `Summary` (displayed as RExI Status), `RExIVersion`, and source metadata.
-- After the central write, the pipeline reads its saved values and mirrors the exact `RExIUpdated`, status, and version into the source document-library item's `RExIUpdated`, `RExISuccess`, and numeric `RExIVersion` fields. The content-section pages display those library items; page contents are not edited. Versions increment only centrally, not independently on each copy.
+- Source-file mirroring is **off by default** (`SHAREPOINT_WRITEBACK_MIRROR_ENABLED=false`). A 2026-10-02 UAT test showed that writing the mirror columns makes SharePoint Approvals reset the file's approval, so only the central list is updated. The source is still verified read-only (approved, unchanged text) before each central write.
+- When mirroring is enabled, after the central write the pipeline reads its saved values and mirrors the exact `RExIUpdated`, status, and version into the source document-library item's `RExIUpdated`, `RExISuccess`, and numeric `RExIVersion` fields. The content-section pages display those library items; page contents are not edited. Versions increment only centrally, not independently on each copy.
 - SharePoint status text is exactly **Success** or **Keep Trying**. Success advances the successful dates/version. A partial or failed ingestion changes only status to Keep Trying in both places, preserving all previous successful dates/versions. A first-ever failure creates a central entry without success dates/version. Error details and retry-limit states remain internal; Keep Trying does not remove the existing retry limit.
 - Source approval remains independent of ingestion status. The pipeline never deliberately changes approval or auto-publishes documents, and it does not use shared tracker status to exclude documents from another environment.
 - Pending tracker payloads are retained even when write-back is disabled. Enabling the flag delivers that environment's backlog. Never enable it in dev.
 - Delivery retries reuse the saved ingestion date; a matching or newer central entry is not version-incremented again. A failed mirror leaves the payload pending, so the next attempt copies the central values rather than creating another ingestion/version. Pending state is cleared only when both destinations are confirmed.
 - File content is verified before success delivery and source updates use `If-Match` with the list-item ETag. Status-only failures do not require downloading/parsing the failed file. A queued failure cannot overwrite a newer central success. Concurrent edits, missing required columns, invalid versions, and unrecognized central status text are explicit delivery errors, not silently truncated/faked successes. Legacy queued success descriptions are normalized to Success.
 - Metadata updates can affect SharePoint's Modified timestamp. Extracted-text hashes prevent metadata-only re-ingestion in every environment, including dev. Source approval is checked again after mirroring: if a library's moderation settings demote the item, delivery remains pending and logs an error requiring manual review; the pipeline does not re-approve it.
-- Older tracker-only pending payloads (including the initial 49-document local ingest) are upgraded lazily by a flagged run using the full source inventory. Identity and the pre-AI text hash are saved before any SharePoint write. An unchanged source revision is required; changed/missing sources must be re-ingested/resolved instead of being marked successful with stale data. No additional DB columns beyond migration 004 are required.
+- With mirroring enabled, older tracker-only pending payloads (including the initial 49-document local ingest) are upgraded lazily by a flagged run using the full source inventory. Identity and the pre-AI text hash are saved before any SharePoint write. An unchanged source revision is required; changed/missing sources must be re-ingested/resolved instead of being marked successful with stale data. No additional DB columns beyond migration 004 are required.
 - The flag is an explicit permission, not automatic environment detection. Configure it separately in each deployment.
 
 **Database Tracking (Postgres / MySQL):**

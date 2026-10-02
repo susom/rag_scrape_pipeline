@@ -29,8 +29,9 @@ def env_bool(name: str, default: bool = False) -> bool:
 
 
 # Env var that gates ALL mutations of shared SharePoint state (tracker-list
-# entries today; source-item status/approval edits in the future). Only the
-# "final" environment in a promotion chain (prod later, UAT for now) should set
+# entries, plus source-file mirror columns when SHAREPOINT_WRITEBACK_MIRROR_ENABLED
+# is also true). Only the "final" environment in a promotion chain (prod later,
+# UAT for now) should set
 # this to true, so non-final environments (dev) ingest without telling
 # SharePoint a document was already processed.
 SHAREPOINT_WRITEBACK_ENABLED = "SHAREPOINT_WRITEBACK_ENABLED"

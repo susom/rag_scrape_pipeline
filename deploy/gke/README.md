@@ -44,7 +44,8 @@ Verify the database identity/schema/grants, source discovery, ingestion, repeat
 deduplication, and chatbot retrieval before resuming the schedule or enabling a
 designated writer. Do not infer readiness from a completed image rollout alone.
 
-Write-back first updates the central Content Status List, then copies its date,
+Write-back updates the central Content Status List. Only when
+`SHAREPOINT_WRITEBACK_MIRROR_ENABLED=true` does it then copy the date,
 status, and version to the source library's `RExIUpdated`, `RExISuccess`, and
 `RExIVersion`. Only the central version increments. Mirror failures stay pending
 and retry without another increment. Source-text hashes distinguish genuine

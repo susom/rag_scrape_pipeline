@@ -18,7 +18,7 @@ from datetime import datetime, timezone
 from dataclasses import dataclass
 from rag_pipeline.sharepoint import SharePointGraphClient, get_site_config
 from rag_pipeline.utils.logger import setup_logger
-from rag_pipeline.utils.env import sharepoint_writeback_enabled
+from rag_pipeline.utils.env import sharepoint_writeback_enabled, sharepoint_writeback_mirror_enabled
 from rag_pipeline.processing.text_extraction import extract_text_from_file
 
 logger = setup_logger()
@@ -872,9 +872,14 @@ def update_tracker_list(
     source: Optional[dict] = None,
     ingestion_succeeded: bool = True,
     attempted_at: Optional[str] = None,
+    mirror_source: Optional[bool] = None,
 ) -> bool:
     """
-    Update the authoritative tracker, then mirror its status onto a source file.
+    Update the authoritative tracker, then optionally mirror its status onto a source file.
+
+    A source target is always verified read-only (still approved, unchanged text)
+    before the central write. It is only written when mirroring is enabled, because
+    a metadata write makes SharePoint Approvals reset the file's approval.
 
     Args:
         title: Title of the page/URL
@@ -883,6 +888,8 @@ def update_tracker_list(
         site_name: Optional site name (None for default site)
         ingestion_succeeded: Success advances dates/version; failure changes only status.
         attempted_at: Failed attempt timestamp, used to avoid overwriting newer success.
+        mirror_source: Write the source file's mirror columns; None reads
+            SHAREPOINT_WRITEBACK_MIRROR_ENABLED (default false).
         summary: Legacy payload field; replaced by the controlled outcome label.
 
     Returns:
@@ -896,6 +903,8 @@ def update_tracker_list(
         )
         return False
     try:
+        if mirror_source is None:
+            mirror_source = sharepoint_writeback_mirror_enabled()
         use_rich_fields = not ingestion_succeeded or source is not None or any([
             content_section, document_title, url, modified_by, document_modified,
             document_modified_by, document_created, approver, summary is not None,
@@ -944,15 +953,17 @@ def update_tracker_list(
             raise ValueError("Tracker needs an Ingestion Date column for retry-safe version updates")
         source_item = None
         if source is not None:
-            for required in ("updated", "summary", "version", "ingestion_date", "document_title"):
-                if not field_names.get(required):
-                    raise ValueError(f"Central tracker is missing the {required} field")
-            if ingestion_succeeded and (not ingestion_date or not increment_version):
-                raise ValueError("Source mirrors require a versioned ingestion with a date")
+            if mirror_source:
+                for required in ("updated", "summary", "version", "ingestion_date", "document_title"):
+                    if not field_names.get(required):
+                        raise ValueError(f"Central tracker is missing the {required} field")
+                if ingestion_succeeded and (not ingestion_date or not increment_version):
+                    raise ValueError("Source mirrors require a versioned ingestion with a date")
+            # Read-only: refuse to publish for an unapproved or since-edited source.
             source_item = _prepare_source_mirror(client, source, status_only=not ingestion_succeeded)
 
         def finish(item_id):
-            if source is None:
+            if source is None or not mirror_source:
                 return True
             if not item_id:
                 raise ValueError("Tracker write returned no item ID; cannot confirm source mirror")

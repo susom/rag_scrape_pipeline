@@ -30,6 +30,8 @@ FIELD_NAMES = {
 @pytest.fixture
 def graph(monkeypatch):
     monkeypatch.setenv("SHAREPOINT_WRITEBACK_ENABLED", "true")
+    # Most tests here exercise mirroring; central-only tests switch this off.
+    monkeypatch.setenv("SHAREPOINT_WRITEBACK_MIRROR_ENABLED", "true")
     monkeypatch.setenv("SHAREPOINT_TRACKER_LIST_ID", "tracker")
     state = {
         "central": {
@@ -225,6 +227,30 @@ def test_approval_change_is_reported_and_never_auto_published(graph):
     assert not deliver()
     client.publish_page.assert_not_called()
     assert not deliver()
+
+
+def test_central_only_updates_tracker_without_touching_source(graph, monkeypatch):
+    client, state = graph
+    monkeypatch.setenv("SHAREPOINT_WRITEBACK_MIRROR_ENABLED", "false")
+    before = deepcopy(state["source"]["listItem"]["fields"])
+    assert deliver()
+    assert state["central"]["fields"]["RExIVersion"] == "5.0"
+    assert state["central"]["fields"]["Summary"] == "Success"
+    assert state["source"]["listItem"]["fields"] == before
+    assert [c.kwargs.get("list_id") for c in client.update_list_item_fields.call_args_list] == ["tracker"]
+
+
+@pytest.mark.parametrize("problem", ["content", "approval"])
+def test_central_only_still_refuses_stale_or_unapproved_source(graph, monkeypatch, problem):
+    client, state = graph
+    monkeypatch.setenv("SHAREPOINT_WRITEBACK_MIRROR_ENABLED", "false")
+    if problem == "content":
+        client.download_file_content.return_value = b"new document content"
+    else:
+        state["source"]["listItem"]["fields"]["_ApprovalStatus"] = 0
+    assert not deliver()
+    client.update_list_item_fields.assert_not_called()
+    client.add_list_item.assert_not_called()
 
 
 def test_flag_off_blocks_both_tracker_and_mirror(graph, monkeypatch):

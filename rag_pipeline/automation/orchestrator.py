@@ -194,6 +194,7 @@ class IngestionOrchestrator:
             logger.info("Starting automated ingestion run")
             logger.info(f"Mode: {'DRY RUN' if self.dry_run else 'LIVE'}")
             logger.info("SharePoint write-back enabled: %s", sharepoint_writeback_enabled())
+            logger.info("SharePoint source-file mirror enabled: %s", sharepoint_writeback_mirror_enabled())
             logger.info(f"Force reprocess: {force_reprocess}")
             if document_ids:
                 logger.info(f"Filtering to {len(document_ids)} document(s)")
@@ -1324,12 +1325,10 @@ class IngestionOrchestrator:
             document_id = record.document_id
             try:
                 payload = json.loads(record.sharepoint_writeback_payload)
-                if not mirror_enabled:
-                    # Central tracker only: a source-file metadata write resets approval.
-                    payload.pop("source", None)
-                elif payload.get("increment_version") and "source" not in payload:
+                # Legacy payloads only need a source target to mirror onto the file.
+                if mirror_enabled and payload.get("increment_version") and "source" not in payload:
                     payload = self._upgrade_pending_source(record, payload)
-                if not update_tracker_list(**payload):
+                if not update_tracker_list(**payload, mirror_source=mirror_enabled):
                     raise RuntimeError("SharePoint tracker/mirror update was not confirmed; will retry")
                 record.sharepoint_writeback_payload = None
                 record.sharepoint_writeback_error = None
