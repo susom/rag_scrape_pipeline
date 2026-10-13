@@ -221,11 +221,15 @@ def test_source_concurrency_conflict_keeps_central_version_for_retry(graph):
     assert state["central"]["fields"]["RExIVersion"] == "5.0"
 
 
-def test_approval_change_is_reported_and_never_auto_published(graph):
+def test_approval_reset_after_mirror_is_accepted_and_never_auto_published(graph):
     client, state = graph
     state["demote_on_write"] = True
-    assert not deliver()
+    assert deliver()
+    mirror = state["source"]["listItem"]["fields"]
+    assert mirror["RExISuccess"] == "Success" and mirror["RExIVersion"] == 5.0
+    assert mirror["_ApprovalStatus"] == 2
     client.publish_page.assert_not_called()
+    # A later delivery refuses the now-unapproved source instead of writing again.
     assert not deliver()
 
 
@@ -297,16 +301,15 @@ def report_retry(**overrides):
     return deliver(ingestion_succeeded=False, attempted_at=INGESTED, **overrides)
 
 
-def test_failed_ingestion_changes_only_status_in_both_places(graph):
+def test_failed_ingestion_changes_only_central_status_and_never_the_source(graph):
     client, state = graph
     central_before = deepcopy(state["central"]["fields"])
     source_before = deepcopy(state["source"]["listItem"]["fields"])
     assert report_retry()
     assert state["central"]["fields"] == {**central_before, "Summary": "Keep Trying"}
-    assert state["source"]["listItem"]["fields"] == {**source_before, "RExISuccess": "Keep Trying"}
+    assert state["source"]["listItem"]["fields"] == source_before
     client.download_file_content.assert_not_called()
-    assert client.update_list_item_fields.call_args_list[0].kwargs["fields"] == {"Summary": "Keep Trying"}
-    assert client.update_list_item_fields.call_args_list[1].args[2] == {"RExISuccess": "Keep Trying"}
+    assert [c.kwargs["fields"] for c in client.update_list_item_fields.call_args_list] == [{"Summary": "Keep Trying"}]
 
 
 def test_first_attempt_failure_does_not_invent_success_dates_or_version(graph):
@@ -317,7 +320,7 @@ def test_first_attempt_failure_does_not_invent_success_dates_or_version(graph):
     central = state["central"]["fields"]
     assert central["Summary"] == "Keep Trying"
     assert not any(field in central for field in ("IngestionDate", "RExIUpdated", "RExIVersion"))
-    assert state["source"]["listItem"]["fields"] == {**previous_source, "RExISuccess": "Keep Trying"}
+    assert state["source"]["listItem"]["fields"] == previous_source
 
 
 def test_retry_status_does_not_require_a_download_or_content_hash(graph):
@@ -328,17 +331,21 @@ def test_retry_status_does_not_require_a_download_or_content_hash(graph):
     client.download_file_content.assert_not_called()
 
 
-def test_partial_retry_status_delivery_is_idempotent(graph):
+def test_retry_status_delivery_is_idempotent(graph):
     client, state = graph
-    state["fail_mirror"] = True
-    assert not report_retry()
+    assert report_retry()
     assert state["central"]["fields"]["Summary"] == "Keep Trying"
-    state["fail_mirror"] = False
     client.update_list_item_fields.reset_mock()
     assert report_retry()
-    assert client.update_list_item_fields.call_count == 1
-    assert client.update_list_item_fields.call_args.args[:2] == ("library", "item")
+    client.update_list_item_fields.assert_not_called()
     assert state["central"]["fields"]["RExIVersion"] == "4.0"
+
+
+def test_failed_retry_status_never_resets_source_approval(graph):
+    _, state = graph
+    state["demote_on_write"] = True
+    assert report_retry()
+    assert state["source"]["listItem"]["fields"]["_ApprovalStatus"] == 3
 
 
 def test_unconfirmed_retry_status_is_not_treated_as_delivered(graph):

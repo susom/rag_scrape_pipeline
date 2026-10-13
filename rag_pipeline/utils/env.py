@@ -46,10 +46,10 @@ def sharepoint_writeback_enabled() -> bool:
     return env_bool(SHAREPOINT_WRITEBACK_ENABLED, default=False)
 
 
-# Env var that additionally allows mirroring tracker values onto the source
-# file's RExI* columns. SharePoint Approvals treats that metadata write as a new
-# version and resets the file's approval, so write-back is central-tracker-only
-# unless an environment explicitly opts in.
+# Env var that additionally mirrors successful ingestions onto the source file's
+# RExI* columns. SharePoint Approvals treats that metadata write as a new version
+# and resets the file's approval (accepted for RExI), so write-back is
+# central-tracker-only unless an environment explicitly opts in.
 SHAREPOINT_WRITEBACK_MIRROR_ENABLED = "SHAREPOINT_WRITEBACK_MIRROR_ENABLED"
 
 

@@ -692,6 +692,34 @@ def _prepare_source_mirror(client: SharePointGraphClient, source: dict, status_o
     return item
 
 
+def _confirm_central_entry(
+    client: SharePointGraphClient,
+    tracker_list_id: str,
+    tracker_item_id: str,
+    field_names: dict,
+    ingestion_date: Optional[str],
+    status_only: bool = False,
+    expected_status: Optional[str] = None,
+) -> dict:
+    """Re-read the central tracker entry and confirm it reflects this delivery."""
+    if not tracker_item_id:
+        raise ValueError("Tracker write returned no item ID; cannot confirm it")
+    fields = client.get_list_item(tracker_list_id, tracker_item_id).get("fields") or {}
+    confirmed_ingestion = fields.get(field_names.get("ingestion_date"))
+    if not status_only and ingestion_date and (
+        not confirmed_ingestion
+        or datetime.fromisoformat(confirmed_ingestion.replace("Z", "+00:00"))
+        < datetime.fromisoformat(ingestion_date.replace("Z", "+00:00"))
+    ):
+        raise ValueError("Central tracker ingestion was not confirmed; refusing to mirror stale values")
+    status = fields.get(field_names["summary"])
+    if status not in INGESTION_STATUSES:
+        raise ValueError("Central RExI Status must be Success or Keep Trying")
+    if expected_status is not None and status != expected_status:
+        raise ValueError("Central tracker status update was not confirmed")
+    return fields
+
+
 def _mirror_tracker_entry(
     client: SharePointGraphClient,
     tracker_list_id: str,
@@ -703,22 +731,13 @@ def _mirror_tracker_entry(
     status_only: bool = False,
     expected_status: Optional[str] = None,
 ) -> bool:
-    central = client.get_list_item(tracker_list_id, tracker_item_id)
-    fields = central.get("fields") or {}
+    fields = _confirm_central_entry(
+        client, tracker_list_id, tracker_item_id, field_names, ingestion_date,
+        status_only=status_only, expected_status=expected_status,
+    )
     updated = fields.get(field_names["updated"])
     status = fields.get(field_names["summary"])
     version = fields.get(field_names["version"])
-    confirmed_ingestion = fields.get(field_names["ingestion_date"])
-    if not status_only and (
-        not confirmed_ingestion
-        or datetime.fromisoformat(confirmed_ingestion.replace("Z", "+00:00"))
-        < datetime.fromisoformat(ingestion_date.replace("Z", "+00:00"))
-    ):
-        raise ValueError("Central tracker ingestion was not confirmed; refusing to mirror stale values")
-    if status not in INGESTION_STATUSES:
-        raise ValueError("Central RExI Status must be Success or Keep Trying")
-    if expected_status is not None and status != expected_status:
-        raise ValueError("Central tracker status update was not confirmed")
     desired = {"RExISuccess": status}
     if not status_only:
         if not updated:
@@ -753,13 +772,15 @@ def _mirror_tracker_entry(
     )
     confirmed = client.get_drive_item(source["drive_id"], source["item_id"])
     confirmed_fields = (confirmed.get("listItem") or {}).get("fields") or {}
-    if not _is_item_approved(confirmed_fields, source.get("approval_field")):
-        raise ValueError(
-            "Source approval changed after metadata write-back; manual review required. "
-            "The pipeline will not publish or re-approve it."
-        )
     if not matches(confirmed_fields):
         raise ValueError("Source mirror values were not confirmed; will retry")
+    if not _is_item_approved(confirmed_fields, source.get("approval_field")):
+        # Expected with SharePoint Approvals: the metadata write is a new, unapproved
+        # version. Accepted by the business; the pipeline never publishes or re-approves.
+        logger.warning(
+            "Source approval reset after mirroring RExI columns; it needs re-approval: %s",
+            source.get("item_id"),
+        )
     logger.info("Source library fields now mirror the central tracker")
     return True
 
@@ -963,7 +984,16 @@ def update_tracker_list(
             source_item = _prepare_source_mirror(client, source, status_only=not ingestion_succeeded)
 
         def finish(item_id):
-            if source is None or not mirror_source:
+            if source is None:
+                return True
+            if not mirror_source or not ingestion_succeeded:
+                # Only successful ingestions are mirrored: the write resets approval, and an
+                # unapproved failed document would no longer be retried.
+                _confirm_central_entry(
+                    client, tracker_list_id, item_id, field_names, ingestion_date,
+                    status_only=not ingestion_succeeded,
+                    expected_status=STATUS_RETRY if not ingestion_succeeded else None,
+                )
                 return True
             if not item_id:
                 raise ValueError("Tracker write returned no item ID; cannot confirm source mirror")

@@ -64,14 +64,17 @@ Before enabling UAT broadly, verify a single file's central/mirrored values and
 approval state. A metadata write that changes approval is reported as an error
 and is never followed by automatic publishing/re-approval.
 
-**Source-file mirroring is off by default.** The 2026-10-02 single-document UAT
-test wrote the central tracker and the `RExI*` mirror columns, and the RExI
-libraries' Approvals feature then reset the file's `_ApprovalStatus` from 3
-(Approved) to 0. Any metadata write to an approved file creates a new,
-unapproved version. Write-back therefore updates only the central Content
-Status List unless `SHAREPOINT_WRITEBACK_MIRROR_ENABLED=true`. Do not set that
-flag while the libraries use Approvals: every mirrored file would leave the
-approved set and stop being ingested.
+**Source-file mirroring resets approval, by agreement.** Any metadata write to an
+approved file creates a new, unapproved version: the 2026-10-02 UAT test reset
+`_ApprovalStatus` from 3 (Approved) to 0 (Not submitted). On 2026-10-13 the
+business accepted that, so the designated writer sets
+`SHAREPOINT_WRITEBACK_MIRROR_ENABLED=true`. Then:
+- Only successful ingestions write the `RExI*` columns. Failures (Keep Trying)
+  update the central list only, so a failed file stays approved and is retried.
+- The reset is logged as a warning, not an error. The pipeline never re-approves;
+  an unapproved file is skipped (its chunks stay) until someone re-approves it.
+  Re-approval changes only metadata, so it does not trigger another ingestion.
+- With the flag false (the default), write-back updates only the central list.
 
 Toggles (all in `configmap.yaml`): `AI_BACKEND=aihub`, `RAG_BACKEND=pgvector`,
 `DB_ENGINE=postgresql` + `DB_IAM_AUTH=true` + `DB_SKIP_INIT_DDL=true`. With these
